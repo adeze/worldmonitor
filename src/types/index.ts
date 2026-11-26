@@ -1,28 +1,188 @@
-export type PropagandaRisk = 'low' | 'medium' | 'high';
+export type DataSourceId =
+  | 'acled'
+  | 'opensky'
+  | 'wingbits'
+  | 'ais'
+  | 'usgs'
+  | 'gdelt'
+  | 'gdelt_doc'
+  | 'rss'
+  | 'polymarket'
+  | 'predictions'
+  | 'pizzint'
+  | 'outages'
+  | 'cyber_threats'
+  | 'weather'
+  | 'ontario_511'
+  | 'alberta_511'
+  | 'manitoba_511'
+  | 'toronto_roads'
+  | 'bc_open511'
+  | 'economic'
+  | 'oil'
+  | 'spending'
+  | 'firms'
+  | 'acled_conflict'
+  | 'ucdp'
+  | 'hapi'
+  | 'ucdp_events'
+  | 'unhcr'
+  | 'climate'
+  | 'worldpop'
+  | 'giving'
+  | 'bis'
+  | 'bls'
+  | 'wto_trade'
+  | 'supply_chain'
+  | 'security_advisories'
+  | 'gpsjam'
+  | 'sanctions_pressure'
+  | 'radiation'
+  | 'treasury_revenue';
+
+// AppContext lives in src/app/app-context.ts because it references
+// components, services, and utils (top-level aggregate type).
+
+export type HappyContentCategory =
+  | 'science-health'
+  | 'nature-wildlife'
+  | 'humanity-kindness'
+  | 'innovation-tech'
+  | 'climate-wins'
+  | 'culture-community';
+
+export interface TechHQ {
+  id: string;
+  company: string;
+  city: string;
+  country: string;
+  lat: number;
+  lon: number;
+  type: 'faang' | 'unicorn' | 'public';
+  employees?: number;
+  marketCap?: string;
+}
+
+export interface DeductContextDetail {
+  query?: string;
+  geoContext: string;
+  autoSubmit?: boolean;
+}
+
+export type PropagandaRisk = 'low' | 'medium' | 'high' | 'unknown';
 
 export interface Feed {
   name: string;
-  url: string;
+  url: string | Record<string, string>;
   type?: string;
   region?: string;
   propagandaRisk?: PropagandaRisk;
   stateAffiliated?: string;  // e.g., "Russia", "China", "Iran"
+  lang?: string;             // ISO 2-letter code for filtering (locale boost)
+  fetchInAllLanguages?: boolean; // keep language metadata/locale defaults, allow selection in any UI language
+  strategicDefault?: boolean; // always default-on regardless of UI language
+  digestLang?: string;        // only this digest language carries it (server is stricter than the browser)
 }
 
-export type { ThreatClassification, ThreatLevel, EventCategory } from '@/services/threat-classifier';
+export type ThreatLevel = 'critical' | 'high' | 'medium' | 'low' | 'info';
+
+export type EventCategory =
+  | 'conflict' | 'protest' | 'disaster' | 'diplomatic' | 'economic'
+  | 'terrorism' | 'cyber' | 'health' | 'environmental' | 'military'
+  | 'crime' | 'infrastructure' | 'tech' | 'general';
+
+export interface ThreatClassification {
+  level: ThreatLevel;
+  category: EventCategory;
+  confidence: number;
+  source: 'keyword' | 'ml' | 'llm';
+}
+
+export type StoryPhase = 'breaking' | 'developing' | 'sustained' | 'fading';
+
+export interface StoryMeta {
+  firstSeen: number;        // epoch ms
+  mentionCount: number;
+  sourceCount: number;
+  phase: StoryPhase;
+}
+
+
+export interface NewsLocationMarker {
+  lat: number;
+  lon: number;
+  title: string;
+  threatLevel: string;
+  timestamp?: Date;
+  /** Original loaded article identity; marker titles may include inferred locations. */
+  article?: Pick<NewsItem, 'link' | 'title' | 'source'>;
+  /**
+   * #9213: the cluster's verdict from assessCorroboration, as the News panel
+   * shows it. Describes coverage, not accuracy.
+   */
+  corroboration?: NewsCorroboration;
+}
+
+/** Structural copy of Corroboration in server/_shared/corroboration.ts; corroboration-flag.ts checks they match. */
+export type NewsCorroboration =
+  | { readonly state: 'corroborated'; readonly publishers: number }
+  | { readonly state: 'single-publisher'; readonly publishers: 1 }
+  | { readonly state: 'tier4-only'; readonly publishers: number }
+  | { readonly state: 'unknown' };
 
 export interface NewsItem {
   source: string;
   title: string;
   link: string;
   pubDate: Date;
+  /**
+   * True when the upstream feed item had no parseable pubDate/published/
+   * updated timestamp. The `pubDate` field is still populated (synthesized
+   * stamp) for display, but ranking/recency consumers MUST route through
+   * `effectivePubDateMs` from feed-date.ts so these items don't claim
+   * false freshness. Optional so synthesized items from non-RSS producers
+   * don't need to set it explicitly — `undefined` is treated as `false`.
+   */
+  pubDateMissing?: boolean;
   isAlert: boolean;
   monitorColor?: string;
   tier?: number;
-  threat?: import('@/services/threat-classifier').ThreatClassification;
+  threat?: ThreatClassification;
   lat?: number;
   lon?: number;
   locationName?: string;
+  lang?: string;
+  happyCategory?: HappyContentCategory;
+  imageUrl?: string;
+  importanceScore?: number;
+  /**
+   * 0-100 source-reliability score, distinct from importanceScore.
+   * Measures truthfulness inputs (tier, propaganda risk, corroboration),
+   * not newsworthiness. 0 is a real low score and must not be treated as absent.
+   */
+  credibilityScore?: number;
+  /** True when credibilityScore rests on no reviewed tier or risk entry for the publisher. */
+  credibilityUnassessed?: boolean;
+  /** Outlet a search feed's aggregator names for this item; `source` is then the search label. */
+  publisher?: string;
+  /** Curated tier spelling of `publisher`, for provenance lookups; absent when it has no tier. */
+  originPublisher?: string;
+  corroborationCount?: number;
+  storyMeta?: StoryMeta;
+  /**
+   * Cleaned RSS/Atom article description — HTML-stripped, entity-decoded,
+   * whitespace-normalised, ≤400 chars. Empty string when the upstream feed
+   * didn't carry a description or it was indistinguishable from the headline.
+   * Consumers MUST fall back to `title` for display when absent (R6).
+   */
+  snippet?: string;
+  /**
+   * Stock tickers extracted at ingest (#4922a): cashtags + company-name
+   * dictionary matches from title + description. Uppercase, deduped,
+   * first-occurrence order, ≤8. Absent on pre-rollout cached items and
+   * non-digest producers.
+   */
+  tickers?: string[];
 }
 
 export type VelocityLevel = 'normal' | 'elevated' | 'spike';
@@ -42,17 +202,26 @@ export interface ClusteredEvent {
   primaryTitle: string;
   primarySource: string;
   primaryLink: string;
+  /** Articles in the cluster — a volume signal, not a corroboration signal. */
   sourceCount: number;
+  /**
+   * Distinct PUBLISHERS behind those articles (#6428). Any "N sources"
+   * corroboration claim shown to a user reads this, never sourceCount:
+   * one newsroom's editions are one publisher.
+   */
+  uniquePublisherCount: number;
   topSources: Array<{ name: string; tier: number; url: string }>;
   allItems: NewsItem[];
   firstSeen: Date;
   lastUpdated: Date;
   isAlert: boolean;
   monitorColor?: string;
+  credibilityScore?: number;
   velocity?: VelocityMetrics;
-  threat?: import('@/services/threat-classifier').ThreatClassification;
+  threat?: ThreatClassification;
   lat?: number;
   lon?: number;
+  lang?: string;
 }
 
 export type AssetType = 'pipeline' | 'cable' | 'datacenter' | 'base' | 'nuclear';
@@ -75,10 +244,14 @@ export interface Sector {
   name: string;
 }
 
+/** Yahoo Finance quote currency of a contract that is not quoted in US dollars. USX is US cents. */
+export type CommodityQuoteCurrency = 'USX' | 'EUR';
+
 export interface Commodity {
   symbol: string;
   name: string;
   display: string;
+  currency?: CommodityQuoteCurrency;
 }
 
 export interface MarketSymbol {
@@ -94,6 +267,13 @@ export interface MarketData {
   price: number | null;
   change: number | null;
   sparkline?: number[];
+  priceSource?: string;
+  priceBasis?: string;
+  priceAt?: number;
+  /** Width of each sparkline bar in seconds (300 intraday, 86400 daily closes). */
+  sparklineIntervalSeconds?: number;
+  /** Start of the first sparkline bar in epoch ms; closed periods are left out after it. */
+  sparklineStartAt?: number;
 }
 
 export interface CryptoData {
@@ -102,6 +282,14 @@ export interface CryptoData {
   price: number;
   change: number;
   sparkline?: number[];
+}
+
+export interface TokenData {
+  name: string;
+  symbol: string;
+  price: number;
+  change24h: number;
+  change7d: number;
 }
 
 export type EscalationTrend = 'escalating' | 'stable' | 'de-escalating';
@@ -153,6 +341,8 @@ export interface Hotspot {
 
 export interface StrategicWaterway {
   id: string;
+  /** Canonical chokepoint ID from chokepoint-registry.ts — same as id. */
+  chokepointId: string;
   name: string;
   lat: number;
   lon: number;
@@ -194,6 +384,12 @@ export interface APTGroup {
   sponsor: string;
   lat: number;
   lon: number;
+  mitreId?: string;
+  mitreUrl?: string;
+  description?: string;
+  tactics?: string[];
+  targetSectors?: string[];
+  active?: boolean;
 }
 
 export type CyberThreatType = 'c2_server' | 'malware_host' | 'phishing' | 'malicious_url';
@@ -231,7 +427,10 @@ export interface ConflictZone {
   location?: string;
   description?: string;
   keyDevelopments?: string[];
+  peaceAgreements?: string[];
+  totalFatalities?: string;
 }
+
 
 // UCDP Georeferenced Events
 export type UcdpEventType = 'state-based' | 'non-state' | 'one-sided';
@@ -242,6 +441,8 @@ export interface UcdpGeoEvent {
   date_end: string;
   latitude: number;
   longitude: number;
+  hasPreciseLocation?: boolean;
+  locationName?: string;
   country: string;
   side_a: string;
   side_b: string;
@@ -252,64 +453,7 @@ export interface UcdpGeoEvent {
   source_original: string;
 }
 
-// UNHCR Displacement Data
-export interface DisplacementFlow {
-  originCode: string;
-  originName: string;
-  asylumCode: string;
-  asylumName: string;
-  refugees: number;
-  originLat?: number;
-  originLon?: number;
-  asylumLat?: number;
-  asylumLon?: number;
-}
-
-export interface CountryDisplacement {
-  code: string;
-  name: string;
-  // Origin-country displacement outflow metrics
-  refugees: number;
-  asylumSeekers: number;
-  idps: number;
-  stateless: number;
-  totalDisplaced: number;
-  // Host-country intake metrics
-  hostRefugees: number;
-  hostAsylumSeekers: number;
-  hostTotal: number;
-  lat?: number;
-  lon?: number;
-}
-
-export interface UnhcrSummary {
-  year: number;
-  globalTotals: {
-    refugees: number;
-    asylumSeekers: number;
-    idps: number;
-    stateless: number;
-    total: number;
-  };
-  countries: CountryDisplacement[];
-  topFlows: DisplacementFlow[];
-}
-
-// Climate Anomaly Data (Open-Meteo / ERA5)
-export type AnomalySeverity = 'normal' | 'moderate' | 'extreme';
-
-export interface ClimateAnomaly {
-  zone: string;
-  lat: number;
-  lon: number;
-  tempDelta: number;
-  precipDelta: number;
-  severity: AnomalySeverity;
-  type: 'warm' | 'cold' | 'wet' | 'dry' | 'mixed';
-  period: string;
-}
-
-// WorldPop Population Exposure
+// Population Exposure
 export interface CountryPopulation {
   code: string;
   name: string;
@@ -325,6 +469,18 @@ export interface PopulationExposure {
   lon: number;
   exposedPopulation: number;
   exposureRadiusKm: number;
+  eventCount: number;
+  locationPending?: boolean;
+}
+
+// Every feed event lands in exactly one bucket: a shown row or one of the three left-out reasons.
+export interface ExposureCoverage {
+  totalEvents: number;
+  withoutPreciseLocation: number;
+  withoutEstimate: number;
+  atOtherPlaces: number;
+  // When true, these counts cover unrest only, not the older UCDP projection.
+  ucdpPending?: boolean;
 }
 
 // Military base operator types
@@ -352,6 +508,16 @@ export interface MilitaryBase {
   arm?: string;               // Armed forces branch (Navy, Air Force, Army, etc.)
   status?: 'active' | 'planned' | 'controversial' | 'closed';
   source?: string;            // Reference URL
+}
+
+export interface MilitaryBaseEnriched extends MilitaryBase {
+  kind?: string;
+  tier?: number;
+  catAirforce?: boolean;
+  catNaval?: boolean;
+  catNuclear?: boolean;
+  catSpace?: boolean;
+  catTraining?: boolean;
 }
 
 export interface CableLandingPoint {
@@ -410,19 +576,26 @@ export interface RepairShip {
   note?: string;
 }
 
-export interface ShippingChokepoint {
-  id: string;
-  name: string;
-  lat: number;
-  lon: number;
-  desc: string;
+// Cable health types (computed from NGA maritime warning signals)
+export type CableHealthStatus = 'ok' | 'degraded' | 'fault' | 'unknown';
+
+export interface CableHealthEvidence {
+  source: string;
+  summary: string;
+  ts: string;
 }
 
-export interface CyberRegion {
-  id: string;
-  group: string;
-  aka: string;
-  sponsor: string;
+export interface CableHealthRecord {
+  status: CableHealthStatus;
+  score: number;
+  confidence: number;
+  lastUpdated: string;
+  evidence: CableHealthEvidence[];
+}
+
+export interface CableHealthResponse {
+  generatedAt: string;
+  cables: Record<string, CableHealthRecord>;
 }
 
 // Nuclear facility types
@@ -444,6 +617,10 @@ export interface NuclearFacility {
   type: NuclearFacilityType;
   status: 'active' | 'contested' | 'inactive' | 'decommissioned' | 'construction';
   operator?: string;  // Operating country
+  operationalSince?: string;
+  treaties?: string[];
+  iaeaStatus?: string;
+  keyEvents?: string[];
 }
 
 export interface GammaIrradiator {
@@ -509,6 +686,17 @@ export interface PanelConfig {
   name: string;
   enabled: boolean;
   priority?: number;
+  premium?: 'locked' | 'enhanced';
+  /** Absolute panel text scale. When absent, the panel follows the global scale. */
+  fontScale?: 0.9 | 1 | 1.1 | 1.25 | 1.5 | 2;
+  /**
+   * Set by `enforceFreePanelLimit` when the free-tier pro gate — not the user —
+   * is what turned this panel off. Distinguishes "hidden because you aren't Pro"
+   * from "you hid it in settings", so the gate can be reversed on upgrade
+   * without overriding a deliberate choice. Used for both `cw-*` panels and
+   * ordinary panels disabled by the free panel-count cap.
+   */
+  proGated?: boolean;
 }
 
 export interface MapLayers {
@@ -520,8 +708,17 @@ export interface MapLayers {
   ais: boolean;
   nuclear: boolean;
   irradiators: boolean;
+  radiationWatch?: boolean;
   sanctions: boolean;
+  /** Sentinel-5P NO2 activity direction per country and industrial cluster. */
+  no2Activity?: boolean;
+  /** ICESat-2 water-surface level status of strategic reservoirs and lakes. */
+  reservoirLevels?: boolean;
   weather: boolean;
+  /** Official Canada road events and conditions from Ontario, Alberta, Toronto, and British Columbia. */
+  canadaRoads: boolean;
+  /** Alberta, B.C., and Saskatchewan province-owned emergency alerts (#6610, #6659). */
+  canadaAlerts: boolean;
   economic: boolean;
   waterways: boolean;
   outages: boolean;
@@ -530,6 +727,7 @@ export interface MapLayers {
   protests: boolean;
   flights: boolean;
   military: boolean;
+  aircraftEmergencies?: boolean;
   natural: boolean;
   spaceports: boolean;
   minerals: boolean;
@@ -544,6 +742,48 @@ export interface MapLayers {
   accelerators: boolean;
   techHQs: boolean;
   techEvents: boolean;
+  // Finance variant layers
+  stockExchanges: boolean;
+  financialCenters: boolean;
+  centralBanks: boolean;
+  commodityHubs: boolean;
+  // Gulf FDI layers
+  gulfInvestments: boolean;
+  // Happy variant layers
+  positiveEvents: boolean;
+  kindness: boolean;
+  happiness: boolean;
+  speciesRecovery: boolean;
+  renewableInstallations: boolean;
+  // Trade route layers
+  tradeRoutes: boolean;
+  // Iran attacks layer
+  iranAttacks: boolean;
+  // GPS/GNSS interference layer
+  gpsJamming: boolean;
+  // Satellite orbital tracking + imagery footprints
+  satellites: boolean;
+
+  // CII choropleth layer
+  ciiChoropleth: boolean;
+  // Resilience choropleth layer
+  resilienceScore: boolean;
+  // Overlay layers
+  dayNight: boolean;
+  // Commodity variant layers
+  miningSites: boolean;
+  processingPlants: boolean;
+  commodityPorts: boolean;
+  webcams: boolean;
+  // Health layers
+  diseaseOutbreaks: boolean;
+  // Energy variant layers (new — optional so existing MapLayers literals
+  // across all other variants remain valid without touching them).
+  storageFacilities?: boolean;
+  fuelShortages?: boolean;
+  /** Live tanker positions (AIS ship type 80-89) inside chokepoint bboxes.
+   *  Refreshed every 60s via getVesselSnapshot. Energy Atlas parity-push. */
+  liveTankers?: boolean;
 }
 
 export interface AIDataCenter {
@@ -560,6 +800,14 @@ export interface AIDataCenter {
   h100Equivalent?: number;
   sector?: string;
   note?: string;
+  /** Optional enrichment; omit fields without verified public evidence. */
+  description?: string;
+  sourceUrl?: string;
+  sourceDate?: string;
+  metadataReviewedAt?: string;
+  firstOperationalDate?: string;
+  locationPrecision?: 'site' | 'city' | 'region' | 'country';
+  powerBasis?: 'reported' | 'estimated';
 }
 
 export interface InternetOutage {
@@ -615,13 +863,6 @@ export interface CriticalMineralProject {
   significance: string;
 }
 
-export interface PredictionMarket {
-  title: string;
-  yesPrice: number;
-  volume?: number;
-  url?: string;
-}
-
 export interface AppState {
   currentView: 'global' | 'us';
   mapZoom: number;
@@ -632,8 +873,6 @@ export interface AppState {
   allNews: NewsItem[];
   isLoading: boolean;
 }
-
-export type FeedCategory = 'politics' | 'tech' | 'finance' | 'gov' | 'intel';
 
 // Social Unrest / Protest Types
 export type ProtestSeverity = 'low' | 'medium' | 'high';
@@ -646,6 +885,7 @@ export interface SocialUnrestEvent {
   summary?: string;
   eventType: ProtestEventType;
   city?: string;
+  hasPreciseLocation?: boolean;
   country: string;
   region?: string;
   lat: number;
@@ -654,6 +894,7 @@ export interface SocialUnrestEvent {
   severity: ProtestSeverity;
   fatalities?: number;
   sources: string[];
+  sourceUrls?: string[];
   sourceType: ProtestSource;
   tags?: string[];
   actors?: string[];
@@ -676,33 +917,6 @@ export interface ProtestCluster {
   primaryCause?: string;
 }
 
-// Flight Delay Types
-export type FlightDelaySource = 'faa' | 'eurocontrol' | 'computed';
-export type FlightDelaySeverity = 'normal' | 'minor' | 'moderate' | 'major' | 'severe';
-export type FlightDelayType = 'ground_stop' | 'ground_delay' | 'departure_delay' | 'arrival_delay' | 'general';
-export type AirportRegion = 'americas' | 'europe' | 'apac' | 'mena' | 'africa';
-
-export interface AirportDelayAlert {
-  id: string;
-  iata: string;
-  icao: string;
-  name: string;
-  city: string;
-  country: string;
-  lat: number;
-  lon: number;
-  region: AirportRegion;
-  delayType: FlightDelayType;
-  severity: FlightDelaySeverity;
-  avgDelayMinutes: number;
-  delayedFlightsPct?: number;
-  cancelledFlights?: number;
-  totalFlights?: number;
-  reason?: string;
-  source: FlightDelaySource;
-  updatedAt: Date;
-}
-
 export interface MonitoredAirport {
   iata: string;
   icao: string;
@@ -711,7 +925,7 @@ export interface MonitoredAirport {
   country: string;
   lat: number;
   lon: number;
-  region: AirportRegion;
+  region: 'americas' | 'europe' | 'apac' | 'mena' | 'africa';
 }
 
 // Military Flight Tracking Types
@@ -747,6 +961,7 @@ export type MilitaryOperator =
 
 export interface MilitaryFlight {
   id: string;
+  source?: string;
   callsign: string;
   hexCode: string;             // ICAO 24-bit address
   registration?: string;
@@ -831,6 +1046,55 @@ export interface MilitaryVessel {
   confidence: 'high' | 'medium' | 'low';
   isInteresting?: boolean;
   note?: string;
+  usniRegion?: string;
+  usniDeploymentStatus?: USNIDeploymentStatus;
+  usniHomePort?: string;
+  usniStrikeGroup?: string;
+  usniActivityDescription?: string;
+  usniArticleUrl?: string;
+  usniArticleDate?: string;
+  usniSource?: boolean;
+}
+
+export type USNIDeploymentStatus = 'deployed' | 'underway' | 'in-port' | 'unknown';
+
+export interface USNIVesselEntry {
+  name: string;
+  hullNumber: string;
+  vesselType: MilitaryVesselType;
+  region: string;
+  regionLat: number;
+  regionLon: number;
+  deploymentStatus: USNIDeploymentStatus;
+  homePort?: string;
+  strikeGroup?: string;
+  activityDescription?: string;
+  usniArticleUrl: string;
+  usniArticleDate: string;
+}
+
+export interface USNIStrikeGroup {
+  name: string;
+  carrier?: string;
+  airWing?: string;
+  destroyerSquadron?: string;
+  escorts: string[];
+}
+
+export interface USNIFleetReport {
+  articleUrl: string;
+  articleDate: string;
+  articleTitle: string;
+  battleForceSummary?: {
+    totalShips: number;
+    deployed: number;
+    underway: number;
+  };
+  vessels: USNIVesselEntry[];
+  strikeGroups: USNIStrikeGroup[];
+  regions: string[];
+  parsingWarnings: string[];
+  timestamp: string;
 }
 
 export interface MilitaryVesselCluster {
@@ -864,6 +1128,7 @@ export interface PizzIntLocation {
   address: string;
   current_popularity: number;
   percentage_of_usual: number | null;
+  no_live_signal?: boolean;
   is_spike: boolean;
   spike_magnitude: number | null;
   data_source: string;
@@ -896,6 +1161,16 @@ export interface GdeltTensionPair {
   trend: 'rising' | 'stable' | 'falling';
   changePercent: number;
   region: string;
+  // Non-news signals above their usual level (scripts/_tension-evidence.mjs).
+  evidence?: TensionEvidence[];
+}
+
+export interface TensionEvidence {
+  channel: string;
+  value: number;
+  baseline: number | null;
+  countries: string[];
+  airports: { name: string; status: string }[];
 }
 
 // NASA EONET Natural Events
@@ -914,6 +1189,44 @@ export type NaturalEventCategory =
   | 'waterColor'
   | 'manmade';
 
+export const NATURAL_EVENT_CATEGORIES: ReadonlySet<NaturalEventCategory> = new Set<NaturalEventCategory>([
+  'severeStorms', 'wildfires', 'volcanoes', 'earthquakes', 'floods', 'landslides',
+  'drought', 'dustHaze', 'snow', 'tempExtremes', 'seaLakeIce', 'waterColor', 'manmade',
+]);
+
+export interface ForecastPoint {
+  lat: number;
+  lon: number;
+  hour: number;
+  windKt: number;
+  category: number;
+  geometryKind?: string;
+}
+
+export interface PastTrackPoint {
+  lat: number;
+  lon: number;
+  windKt: number;
+  timestamp: number;
+  geometryKind?: string;
+}
+
+/** A single agency report retained on a canonical tropical cyclone event. */
+export interface CycloneAgencyObservation {
+  agency: string;
+  agencyId: string;
+  observedAt: number;
+  lat: number;
+  lon: number;
+  windKt?: number;
+  windAveragingPeriodMinutes?: number;
+  pressureMb?: number;
+  classification?: string;
+  status: string;
+  sourceName?: string;
+  sourceUrl?: string;
+}
+
 export interface NaturalEvent {
   id: string;
   title: string;
@@ -928,6 +1241,30 @@ export interface NaturalEvent {
   sourceUrl?: string;
   sourceName?: string;
   closed: boolean;
+  stormId?: string;
+  stormName?: string;
+  basin?: string;
+  stormCategory?: number;
+  classification?: string;
+  windKt?: number;
+  pressureMb?: number;
+  movementDir?: number;
+  movementSpeedKt?: number;
+  forecastTrack?: ForecastPoint[];
+  conePolygon?: number[][][];
+  coneGeometryKind?: string;
+  windRadii?: Array<{
+    thresholdKt?: number | null;
+    thresholdLabel?: string;
+    polygons?: number[][][][];
+    geometryKind?: string;
+  }>;
+  pastTrack?: PastTrackPoint[];
+  canonicalId?: string;
+  matchingConfidence?: string;
+  canonicalAliases?: string[];
+  windAveragingPeriodMinutes?: number;
+  agencyObservations?: CycloneAgencyObservation[];
 }
 
 // Infrastructure Cascade Types
@@ -999,15 +1336,34 @@ export interface CascadeResult {
     id: string;
     name: string;
     capacityShare: number;
+    /** False when the alternative crosses a chokepoint that a cut cable also crosses. */
+    avoidsCutZone?: boolean;
   }[];
+  /** Every disrupted node when several were cut together (multi-cable / chokepoint cut). */
+  sources?: InfrastructureNode[];
+  /** Present when the result rests on estimated rather than measured inputs. */
+  dataQuality?: {
+    estimated: boolean;
+    note: string;
+  };
 }
 
-// Re-export port types
-export type { Port, PortType } from '@/config/ports';
+export type PortType = 'container' | 'oil' | 'lng' | 'naval' | 'mixed' | 'bulk';
+
+export interface Port {
+  id: string;
+  name: string;
+  lat: number;
+  lon: number;
+  country: string;
+  type: PortType;
+  rank?: number;
+  note: string;
+}
 
 // AI Regulation Types
 export type RegulationType = 'comprehensive' | 'sectoral' | 'voluntary' | 'proposed';
-export type ComplianceStatus = 'active' | 'proposed' | 'draft' | 'superseded';
+export type ComplianceStatus = 'active' | 'proposed' | 'draft' | 'superseded' | 'revoked' | 'lapsed';
 export type RegulationStance = 'strict' | 'moderate' | 'permissive' | 'undefined';
 
 export interface AIRegulation {
@@ -1020,12 +1376,23 @@ export interface AIRegulation {
   status: ComplianceStatus;
   announcedDate: string;
   effectiveDate?: string;
-  complianceDeadline?: string;
+  deadlines?: ComplianceDeadline[];
   scope: string[];
   keyProvisions: string[];
   penalties?: string;
   link?: string;
   description?: string;
+}
+
+export interface ComplianceDeadline {
+  date: string;
+  label: string;
+  source: string;
+}
+
+export interface RegulationDeadline {
+  regulation: AIRegulation;
+  deadline: ComplianceDeadline;
 }
 
 export interface RegulatoryAction {
@@ -1038,6 +1405,7 @@ export interface RegulatoryAction {
   description: string;
   impact: 'high' | 'medium' | 'low';
   source?: string;
+  sourceUrl: string;
 }
 
 export interface CountryRegulationProfile {
@@ -1159,8 +1527,76 @@ export interface FocalPointSummary {
   topCompanies: FocalPoint[];
 }
 
+// ============================================
+// GULF FDI TYPES
+// ============================================
+
+export type GulfInvestorCountry = 'SA' | 'UAE';
+
+export type GulfInvestmentSector =
+  | 'ports'
+  | 'pipelines'
+  | 'energy'
+  | 'datacenters'
+  | 'airports'
+  | 'railways'
+  | 'telecoms'
+  | 'water'
+  | 'logistics'
+  | 'mining'
+  | 'real-estate'
+  | 'manufacturing';
+
+export type GulfInvestmentStatus =
+  | 'operational'
+  | 'under-construction'
+  | 'announced'
+  | 'rumoured'
+  | 'cancelled'
+  | 'divested';
+
+export type GulfInvestingEntity =
+  | 'DP World'
+  | 'AD Ports'
+  | 'Mubadala'
+  | 'ADIA'
+  | 'ADNOC'
+  | 'Masdar'
+  | 'PIF'
+  | 'Saudi Aramco'
+  | 'ACWA Power'
+  | 'STC'
+  | 'Mawani'
+  | 'NEOM'
+  | 'Emirates Global Aluminium'
+  | 'Other';
+
+export interface GulfInvestment {
+  id: string;
+  investingEntity: GulfInvestingEntity;
+  investingCountry: GulfInvestorCountry;
+  targetCountry: string;
+  targetCountryIso: string;
+  sector: GulfInvestmentSector;
+  assetType: string;
+  assetName: string;
+  lat: number;
+  lon: number;
+  investmentUSD?: number;
+  stakePercent?: number;
+  status: GulfInvestmentStatus;
+  yearAnnounced?: number;
+  yearOperational?: number;
+  description: string;
+  sourceUrl?: string;
+  tags?: string[];
+}
+
 export interface MapProtestCluster {
   id: string;
+  /** Explicit leaf/group discriminant set at Supercluster flatten time (see DeckGLMap). */
+  _kind: 'leaf' | 'group';
+  _clusterId?: number;
   lat: number;
   lon: number;
   count: number;
@@ -1178,10 +1614,13 @@ export interface MapProtestCluster {
 
 export interface MapTechHQCluster {
   id: string;
+  /** Explicit leaf/group discriminant set at Supercluster flatten time (see DeckGLMap). */
+  _kind: 'leaf' | 'group';
+  _clusterId?: number;
   lat: number;
   lon: number;
   count: number;
-  items: import('@/config/tech-geo').TechHQ[];
+  items: TechHQ[];
   city: string;
   country: string;
   primaryType: 'faang' | 'unicorn' | 'public';
@@ -1193,6 +1632,9 @@ export interface MapTechHQCluster {
 
 export interface MapTechEventCluster {
   id: string;
+  /** Explicit leaf/group discriminant set at Supercluster flatten time (see DeckGLMap). */
+  _kind: 'leaf' | 'group';
+  _clusterId?: number;
   lat: number;
   lon: number;
   count: number;
@@ -1206,6 +1648,9 @@ export interface MapTechEventCluster {
 
 export interface MapDatacenterCluster {
   id: string;
+  /** Explicit leaf/group discriminant set at Supercluster flatten time (see DeckGLMap). */
+  _kind: 'leaf' | 'group';
+  _clusterId?: number;
   lat: number;
   lon: number;
   count: number;
@@ -1219,3 +1664,38 @@ export interface MapDatacenterCluster {
   plannedCount?: number;
   sampled?: boolean;
 }
+
+export interface CountryBriefSignals {
+  criticalNews: number;
+  protests: number;
+  militaryFlights: number;
+  militaryVessels: number;
+  militaryFlightsInCountry: number;
+  militaryVesselsInCountry: number;
+  outages: number;
+  aisDisruptions: number;
+  satelliteFires: number;
+  radiationAnomalies: number;
+  /** Observed country anomalies; null when the cluster snapshot is unavailable. */
+  temporalAnomalies: number | null;
+  /** Global observations, never included in country counts or severity totals. */
+  globalTemporalAnomalies?: number | null;
+  cyberThreats: number;
+  earthquakes: number;
+  displacementOutflow: number;
+  climateStress: number;
+  conflictEvents: number;
+  activeStrikes: number;
+  orefSirens: number;
+  orefHistory24h: number;
+  aviationDisruptions: number;
+  travelAdvisories: number;
+  travelAdvisoryMaxLevel: string | null;
+  gpsJammingHexes: number;
+  isTier1: boolean;
+  thermalEscalations: number;
+  sanctionsDesignations: number;
+  sanctionsNewDesignations: number;
+}
+
+export type CountrySignalCounts = { [K in keyof CountryBriefSignals]: CountryBriefSignals[K] | null };

@@ -2,200 +2,39 @@
  * Shared constants for clustering and correlation analysis.
  * Used by both main-thread services and the analysis worker.
  *
- * IMPORTANT: If you change these values, update the worker too!
- * The worker (src/workers/analysis.worker.ts) has a copy of these
- * values for isolation. Keep them in sync.
+ * The pure text primitives (tokenize, jaccardSimilarity, STOP_WORDS,
+ * TOPIC_KEYWORDS, SUPPRESSED_TRENDING_TERMS, …) now live in
+ * shared/text-analysis-core.js (issue #5697) so server-side MCP tools share
+ * them; they are re-exported here unchanged, as are the correlation thresholds
+ * and signal id/dedupe helpers from shared/market-alert-core.js (issue #8867).
+ * This module additionally carries the client-only signal context/i18n, which
+ * is why server code must import the shared modules, never this one.
  */
 
-// Clustering constants
-export const SIMILARITY_THRESHOLD = 0.5;
-
-export const STOP_WORDS = new Set([
-  'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for',
-  'of', 'with', 'by', 'from', 'as', 'is', 'was', 'are', 'were', 'been',
-  'be', 'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would',
-  'could', 'should', 'may', 'might', 'must', 'shall', 'can', 'need',
-  'it', 'its', 'this', 'that', 'these', 'those', 'i', 'you', 'he',
-  'she', 'we', 'they', 'what', 'which', 'who', 'whom', 'how', 'when',
-  'where', 'why', 'all', 'each', 'every', 'both', 'few', 'more', 'most',
-  'other', 'some', 'such', 'no', 'not', 'only', 'same', 'so', 'than',
-  'too', 'very', 'just', 'also', 'now', 'new', 'says', 'said', 'after',
-]);
-
-// Correlation constants
-export const PREDICTION_SHIFT_THRESHOLD = 5;
-export const MARKET_MOVE_THRESHOLD = 2;
-export const NEWS_VELOCITY_THRESHOLD = 3;
-export const FLOW_PRICE_THRESHOLD = 1.5;
-export const ENERGY_COMMODITY_SYMBOLS = new Set(['CL=F', 'NG=F']);
-
-export const PIPELINE_KEYWORDS = ['pipeline', 'pipelines', 'line', 'terminal'];
-export const FLOW_DROP_KEYWORDS = [
-  'flow', 'throughput', 'capacity', 'outage', 'leak', 'rupture', 'shutdown',
-  'maintenance', 'curtailment', 'force majeure', 'halt', 'halted', 'reduced',
-  'reduction', 'drop', 'offline', 'suspend', 'suspended', 'stoppage',
-];
-
-export const TOPIC_KEYWORDS = [
-  'iran', 'israel', 'ukraine', 'russia', 'china', 'taiwan', 'oil', 'crypto',
-  'fed', 'interest', 'inflation', 'recession', 'war', 'sanctions', 'tariff',
-  'ai', 'tech', 'layoff', 'trump', 'biden', 'election',
-];
-
-export const SUPPRESSED_TRENDING_TERMS = new Set<string>([
-  // Meta / media terms
-  'ai', 'app', 'api', 'new', 'top', 'big', 'ceo', 'cto',
-  'update', 'report', 'latest', 'breaking', 'analysis',
-  'reuters', 'exclusive', 'opinion', 'editorial', 'watch',
-  'live', 'video', 'photo', 'photos', 'read', 'full',
-  'source', 'sources', 'according', 'ahead', 'english',
-  'times', 'post', 'news', 'press', 'media', 'journal',
-  'morning', 'evening', 'daily', 'weekly', 'monthly',
-  'newsletter', 'subscribe', 'podcast', 'interview',
-  // Common news verbs (not meaningful standalone)
-  'says', 'said', 'tells', 'told', 'calls', 'called',
-  'makes', 'made', 'takes', 'took', 'gets', 'gives', 'gave',
-  'goes', 'went', 'comes', 'came', 'puts', 'sets', 'set',
-  'shows', 'shown', 'finds', 'found', 'keeps', 'kept',
-  'holds', 'held', 'runs', 'turns', 'turned', 'leads', 'led',
-  'brings', 'brought', 'starts', 'started', 'moves', 'moved',
-  'plans', 'planned', 'wants', 'wanted', 'needs', 'needed',
-  'looks', 'looked', 'works', 'worked', 'tries', 'tried',
-  'asks', 'asked', 'uses', 'used', 'expects', 'expected',
-  'reports', 'reported', 'claims', 'claimed', 'warns', 'warned',
-  'reveals', 'revealed', 'announces', 'announced', 'confirms',
-  'confirmed', 'denies', 'denied', 'launches', 'launched',
-  'signs', 'signed', 'faces', 'faced', 'seeks', 'sought',
-  'hits', 'hit', 'dies', 'died', 'killed', 'kills',
-  'rises', 'rose', 'falls', 'fell', 'wins', 'won', 'lost',
-  'ends', 'ended', 'begins', 'began', 'opens', 'opened',
-  'closes', 'closed', 'raises', 'raised', 'cuts', 'cut',
-  'adds', 'added', 'drops', 'dropped', 'pushes', 'pushed',
-  'pulls', 'pulled', 'backs', 'backed', 'blocks', 'blocked',
-  'passes', 'passed', 'votes', 'voted', 'joins', 'joined',
-  'leaves', 'left', 'returns', 'returned', 'sends', 'sent',
-  'urges', 'urged', 'vows', 'vowed', 'pledges', 'pledged',
-  'rejects', 'rejected', 'approves', 'approved',
-  // Common news adjectives / adverbs / time words
-  'first', 'last', 'next', 'major', 'former', 'still',
-  'despite', 'amid', 'over', 'under', 'back', 'year',
-  'years', 'day', 'days', 'week', 'weeks', 'month', 'months',
-  'time', 'long', 'high', 'low', 'part', 'early', 'late',
-  'key', 'two', 'three', 'four', 'five', 'million', 'billion',
-  'percent', 'nearly', 'almost', 'already', 'just', 'even',
-  'since', 'while', 'during', 'before', 'between', 'again',
-  'against', 'into', 'through', 'around', 'about', 'much',
-  'many', 'several', 'second', 'third', 'possible', 'likely',
-  'least', 'best', 'worst', 'largest', 'biggest', 'smallest',
-  'highest', 'lowest', 'record', 'global', 'local',
-  // Generic news nouns (too vague as standalone trends)
-  'state', 'states', 'department', 'officials', 'official',
-  'country', 'countries', 'people', 'group', 'groups',
-  'plan', 'deal', 'talks', 'move', 'order', 'case',
-  'house', 'court', 'secretary', 'board', 'control',
-  'power', 'leader', 'leaders', 'government', 'minister',
-  'president', 'agency', 'market', 'markets', 'company',
-  'companies', 'world', 'white', 'head', 'side', 'point',
-  'end', 'line', 'area', 'number', 'issue', 'issues',
-  'policy', 'security', 'force', 'forces', 'system',
-  'service', 'services', 'program', 'project', 'effort',
-  'action', 'support', 'level', 'rate', 'rates', 'price',
-  'prices', 'trade', 'growth', 'change', 'changes',
-  'crisis', 'risk', 'impact', 'future', 'history',
-  'data', 'team', 'member', 'members', 'office',
-  'sector', 'region', 'regions', 'center', 'role',
-  'south', 'north', 'east', 'west', 'eastern', 'western',
-  'southern', 'northern', 'central', 'middle',
-  'united', 'national', 'international', 'federal',
-  // Base verb forms (fallback when NER model unavailable)
-  'say', 'get', 'give', 'go', 'come', 'put', 'take', 'make',
-  'know', 'think', 'see', 'want', 'look', 'find', 'tell', 'ask',
-  'use', 'try', 'leave', 'call', 'keep', 'let', 'begin', 'show',
-  'hear', 'play', 'run', 'move', 'help', 'turn', 'start', 'hold',
-  'bring', 'write', 'provide', 'sit', 'stand', 'lose', 'pay',
-  'meet', 'include', 'continue', 'learn', 'lead', 'believe',
-  'feel', 'follow', 'stop', 'speak', 'allow', 'add', 'grow',
-  'open', 'walk', 'win', 'offer', 'appear', 'buy', 'wait',
-  'serve', 'die', 'send', 'build', 'stay', 'fall', 'reach',
-  'remain', 'suggest', 'raise', 'sell', 'require', 'decide',
-  'develop', 'break', 'happen', 'create', 'live',
-  // Numbers and misc
-  '000', '100', '200', '500', 'per', 'than',
-]);
-
-
-export const TOPIC_MAPPINGS: Record<string, string[]> = {
-  'iran': ['iran', 'israel', 'oil', 'sanctions'],
-  'israel': ['israel', 'iran', 'war', 'gaza'],
-  'ukraine': ['ukraine', 'russia', 'war', 'nato'],
-  'russia': ['russia', 'ukraine', 'sanctions'],
-  'china': ['china', 'taiwan', 'tariff', 'trade'],
-  'taiwan': ['taiwan', 'china'],
-  'trump': ['trump', 'election', 'tariff'],
-  'fed': ['fed', 'interest', 'inflation', 'recession'],
-  'bitcoin': ['crypto', 'bitcoin'],
-  'recession': ['recession', 'fed', 'inflation'],
-};
-
-// Pure utility functions that can be shared
-export function tokenize(text: string): Set<string> {
-  const words = text
-    .toLowerCase()
-    .replace(/[^a-z0-9\s]/g, ' ')
-    .split(/\s+/)
-    .filter(w => w.length > 2 && !STOP_WORDS.has(w));
-  return new Set(words);
-}
-
-export function jaccardSimilarity(a: Set<string>, b: Set<string>): number {
-  if (a.size === 0 && b.size === 0) return 0;
-  const intersection = new Set([...a].filter(x => b.has(x)));
-  const union = new Set([...a, ...b]);
-  return intersection.size / union.size;
-}
-
-export function includesKeyword(text: string, keywords: string[]): boolean {
-  return keywords.some(keyword => text.includes(keyword));
-}
-
-export function escapeRegex(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
-
-export function containsTopicKeyword(text: string, keyword: string): boolean {
-  const normalizedKeyword = keyword.trim().toLowerCase();
-  if (!normalizedKeyword) return false;
-  const pattern = new RegExp(`\\b${escapeRegex(normalizedKeyword)}\\b`, 'i');
-  return pattern.test(text);
-}
-
-export function findRelatedTopics(prediction: string): string[] {
-  const title = prediction.toLowerCase();
-  const related: string[] = [];
-
-  for (const [key, topics] of Object.entries(TOPIC_MAPPINGS)) {
-    if (containsTopicKeyword(title, key)) {
-      related.push(...topics);
-    }
-  }
-
-  return [...new Set(related)];
-}
-
-export function generateSignalId(): string {
-  return `sig-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-}
-
-export function generateDedupeKey(type: string, identifier: string, value: number): string {
-  // Market signals dedupe by symbol only (not by change value)
-  // This prevents duplicates when price fluctuates slightly
-  const marketSignals = ['silent_divergence', 'flow_price_divergence', 'explained_market_move'];
-  if (marketSignals.includes(type)) {
-    return `${type}:${identifier}`;
-  }
-  const roundedValue = Math.round(value * 10) / 10;
-  return `${type}:${identifier}:${roundedValue}`;
-}
+export {
+  SIMILARITY_THRESHOLD,
+  STOP_WORDS,
+  TOPIC_KEYWORDS,
+  SUPPRESSED_TRENDING_TERMS,
+  tokenize,
+  jaccardSimilarity,
+  includesKeyword,
+  escapeRegex,
+  containsTopicKeyword,
+} from '../../shared/text-analysis-core.js';
+export {
+  PREDICTION_SHIFT_THRESHOLD,
+  MARKET_MOVE_THRESHOLD,
+  NEWS_VELOCITY_THRESHOLD,
+  FLOW_PRICE_THRESHOLD,
+  ENERGY_COMMODITY_SYMBOLS,
+  PIPELINE_KEYWORDS,
+  FLOW_DROP_KEYWORDS,
+  TOPIC_MAPPINGS,
+  findRelatedTopics,
+  generateSignalId,
+  generateDedupeKey,
+} from '../../shared/market-alert-core.js';
 
 // Signal context: "Why it matters" explanations (Quick Win #3)
 // Each signal type has a brief explanation of its analytical significance
@@ -223,8 +62,8 @@ export interface SignalContext {
 
 export const SIGNAL_CONTEXT: Record<SignalType, SignalContext> = {
   prediction_leads_news: {
-    whyItMatters: 'Prediction markets often price in information before it becomes news—traders may have early access to developments.',
-    actionableInsight: 'Monitor for breaking news in the next 1-6 hours that could explain the market move.',
+    whyItMatters: 'A prediction market moved while news coverage of the topic stayed low—the market may be reacting to information that has not been reported yet.',
+    actionableInsight: 'Monitor for breaking news that could explain the market move.',
     confidenceNote: 'Higher confidence if multiple prediction markets move in same direction.',
   },
   news_leads_markets: {
@@ -294,10 +133,13 @@ export const SIGNAL_CONTEXT: Record<SignalType, SignalContext> = {
   },
 };
 
+import { t } from '@/services/i18n';
+
 export function getSignalContext(type: SignalType): SignalContext {
-  return SIGNAL_CONTEXT[type] ?? {
-    whyItMatters: 'Signal detected.',
-    actionableInsight: 'Monitor for developments.',
-    confidenceNote: 'Standard confidence.',
+  const key = SIGNAL_CONTEXT[type] ? type : 'fallback';
+  return {
+    whyItMatters: t(`signals.context.${key}.whyItMatters`),
+    actionableInsight: t(`signals.context.${key}.actionableInsight`),
+    confidenceNote: t(`signals.context.${key}.confidenceNote`),
   };
 }

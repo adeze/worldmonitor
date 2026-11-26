@@ -60,7 +60,6 @@ export async function detectMLCapabilities(): Promise<MLCapabilities> {
     recommendedThreads,
   };
 
-  console.log('[MLCapabilities]', cachedCapabilities);
   return cachedCapabilities;
 }
 
@@ -109,16 +108,4 @@ function estimateAvailableMemory(): number {
   }
 
   return 256;
-}
-
-export function shouldEnableMLFeatures(): boolean {
-  return cachedCapabilities?.isSupported ?? false;
-}
-
-export function getMLCapabilities(): MLCapabilities | null {
-  return cachedCapabilities;
-}
-
-export function clearCapabilitiesCache(): void {
-  cachedCapabilities = null;
 }

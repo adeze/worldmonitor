@@ -1,5 +1,7 @@
 import type { ClusteredEvent } from '@/types';
+import { headlineWithoutPublisher } from '../../shared/headline-publisher.js';
 import { inferHubsFromTitle, type TechHubLocation } from './tech-hub-index';
+import { deriveHubActivityLevel, deriveHubTrend, normalizeHubScore } from './hub-activity-scoring';
 
 export interface TechHubActivity {
   hubId: string;
@@ -37,11 +39,15 @@ export function aggregateTechActivity(clusters: ClusteredEvent[]): TechHubActivi
 
   // Match each cluster to potential tech hubs
   for (const cluster of clusters) {
-    const matches = inferHubsFromTitle(cluster.primaryTitle);
+    const headline = headlineWithoutPublisher(cluster.primaryTitle, cluster.primaryLink, cluster.primarySource);
+    const matches = inferHubsFromTitle(headline);
+    const isTechStory = cluster.threat?.category === 'tech';
 
     for (const match of matches) {
       // Only consider matches with reasonable confidence
       if (match.confidence < 0.5) continue;
+      // A city name alone is technology evidence only in a technology story.
+      if (match.evidence === 'place' && !isTechStory) continue;
 
       let acc = hubAccumulators.get(match.hubId);
       if (!acc) {
@@ -94,19 +100,8 @@ export function aggregateTechActivity(clusters: ClusteredEvent[]): TechHubActivi
     const newsCount = acc.clusters.length;
 
     // Normalize to 0-100 scale relative to top hub
-    const score = maxRawScore > 0
-      ? Math.round((rawScore / maxRawScore) * 100)
-      : 0;
-
-    // Determine activity level based on relative position
-    let activityLevel: 'high' | 'elevated' | 'low';
-    if (score >= 70 || acc.hasBreaking) {
-      activityLevel = 'high';
-    } else if (score >= 40) {
-      activityLevel = 'elevated';
-    } else {
-      activityLevel = 'low';
-    }
+    const score = normalizeHubScore(rawScore, maxRawScore);
+    const activityLevel = deriveHubActivityLevel(score, acc.hasBreaking);
 
     // Get top stories (up to 3)
     const topStories = acc.clusters
@@ -114,12 +109,7 @@ export function aggregateTechActivity(clusters: ClusteredEvent[]): TechHubActivi
       .map(c => ({ title: c.primaryTitle, link: c.primaryLink }));
 
     // Determine trend based on velocity
-    let trend: 'rising' | 'stable' | 'falling' = 'stable';
-    if (acc.totalVelocity > 2) {
-      trend = 'rising';
-    } else if (acc.totalVelocity < 0.5 && newsCount > 1) {
-      trend = 'falling';
-    }
+    const trend = deriveHubTrend(acc.totalVelocity, newsCount);
 
     activities.push({
       hubId,
@@ -147,9 +137,4 @@ export function aggregateTechActivity(clusters: ClusteredEvent[]): TechHubActivi
 
 export function getTopActiveHubs(clusters: ClusteredEvent[], limit = 10): TechHubActivity[] {
   return aggregateTechActivity(clusters).slice(0, limit);
-}
-
-export function getHubActivity(hubId: string, clusters: ClusteredEvent[]): TechHubActivity | undefined {
-  const activities = aggregateTechActivity(clusters);
-  return activities.find(a => a.hubId === hubId);
 }

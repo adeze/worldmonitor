@@ -1,6 +1,7 @@
 # Tauri Validation Report
 
 ## Scope
+
 Validated desktop build readiness for the World Monitor Tauri app by checking frontend compilation, TypeScript integrity, and Tauri/Rust build execution.
 
 ## Preflight checks before desktop validation
@@ -21,10 +22,11 @@ If any of these checks fail, treat downstream desktop build failures as environm
 1. `npm ci` — failed because the environment blocks downloading the pinned `@tauri-apps/cli` package from npm (`403 Forbidden`).
 2. `npm run typecheck` — succeeded.
 3. `npm run build:full` — succeeded (warnings only).
-4. `npm run desktop:build:full` — not runnable in this environment because `npm ci` failed, so the local `tauri` binary was unavailable (desktop scripts now fail fast with a clear `npm ci` remediation message when this occurs).
+4. `npm run desktop:tauri:build` — not runnable in this environment because `npm ci` failed, so the local `tauri` binary was unavailable (desktop scripts now fail fast with a clear `npm ci` remediation message when this occurs).
 5. `cargo check` (from `src-tauri/`) — failed because the environment blocks downloading crates from `https://index.crates.io` (`403 CONNECT tunnel failed`).
 
 ## Assessment
+
 - The web app portion compiles successfully.
 - Full Tauri desktop validation in this run is blocked by an **external environment outage/restriction** (registry access denied with HTTP 403).
 - No code/runtime defects were observed in project sources during this validation pass.
@@ -42,11 +44,12 @@ Use these labels in future reports so outcomes are actionable:
    - Action: provision offline artifacts/mirror config first, enable offline override (`config.local.toml` or CLI `--config`), then rerun.
 
 ## Next action to validate desktop end-to-end
+
 Choose one supported path:
 
 - Online path:
   - `npm ci`
-  - `npm run desktop:build:full`
+  - `npm run desktop:tauri:build`
 
 - Restricted-network path:
   - Restore prebuilt offline artifacts (including `src-tauri/vendor/` or internal mirror mapping).
@@ -63,4 +66,4 @@ If preflight fails, use one of these approved remediations:
 - Pre-vendor Rust crates (`src-tauri/vendor/`) and run Cargo in offline mode.
 - Use CI runners that restore package/cache artifacts from a trusted internal store before builds.
 
-For release packaging details, see `docs/RELEASE_PACKAGING.md` (section: **Network preflight and remediation**).
+For release packaging details, see `docs/release-packaging.mdx` (section: **Network preflight and remediation**).

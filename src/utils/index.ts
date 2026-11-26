@@ -1,53 +1,39 @@
 export function formatTime(date: Date): string {
   const now = new Date();
   const diff = Math.floor((now.getTime() - date.getTime()) / 1000);
+  // Script-sensitive, so the full tag: Intl renders zh as Simplified, which put
+  // 分钟/小时/上周 in front of Traditional readers on every timestamped item.
+  const lang = getCurrentLanguageTag();
 
-  if (diff < 60) return 'Just now';
-  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
-  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
-  return `${Math.floor(diff / 86400)}d ago`;
-}
+  // Safe fallback if Intl is not available (though it is in all modern browsers)
+  try {
+    const rtf = new Intl.RelativeTimeFormat(lang, { numeric: 'auto' });
 
-export function formatPrice(price: number): string {
-  if (price >= 1000) {
-    return `$${price.toLocaleString(undefined, {
-      minimumFractionDigits: 0,
-      maximumFractionDigits: 0,
-    })}`;
+    if (diff < 60) return rtf.format(-Math.round(diff), 'second');
+    if (diff < 3600) return rtf.format(-Math.round(diff / 60), 'minute');
+    if (diff < 86400) return rtf.format(-Math.round(diff / 3600), 'hour');
+    return rtf.format(-Math.round(diff / 86400), 'day');
+  } catch (e) {
+    if (diff < 60) return 'Just now';
+    if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
+    if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
+    return `${Math.floor(diff / 86400)}d ago`;
   }
-  return `$${price.toLocaleString(undefined, {
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2,
-  })}`;
 }
 
-export function formatChange(change: number): string {
-  const sign = change >= 0 ? '+' : '';
-  return `${sign}${change.toFixed(2)}%`;
-}
-
-export function getChangeClass(change: number): string {
-  return change >= 0 ? 'up' : 'down';
-}
-
-export function getHeatmapClass(change: number): string {
-  const abs = Math.abs(change);
-  const direction = change >= 0 ? 'up' : 'down';
-
-  if (abs >= 2) return `${direction}-3`;
-  if (abs >= 1) return `${direction}-2`;
-  return `${direction}-1`;
-}
+export { formatChange, formatCommodityPrice, formatPrice, formatQuotePrice, getChangeClass, getHeatmapClass } from './market-format';
 
 export function debounce<T extends (...args: unknown[]) => void>(
   fn: T,
   delay: number
-): (...args: Parameters<T>) => void {
+): ((...args: Parameters<T>) => void) & { cancel(): void } {
   let timeoutId: ReturnType<typeof setTimeout>;
-  return (...args: Parameters<T>) => {
+  const debounced = (...args: Parameters<T>) => {
     clearTimeout(timeoutId);
     timeoutId = setTimeout(() => fn(...args), delay);
   };
+  debounced.cancel = () => { clearTimeout(timeoutId); };
+  return debounced;
 }
 
 export function throttle<T extends (...args: unknown[]) => void>(
@@ -65,15 +51,16 @@ export function throttle<T extends (...args: unknown[]) => void>(
   };
 }
 
-export function rafSchedule<T extends (...args: unknown[]) => void>(fn: T): (...args: Parameters<T>) => void {
+export function rafSchedule<T extends (...args: unknown[]) => void>(fn: T): ((...args: Parameters<T>) => void) & { cancel(): void } {
   // Frame-synchronized scheduling for visual updates; batches repeated calls into one render frame.
   let scheduled = false;
+  let rafId = 0;
   let lastArgs: Parameters<T> | null = null;
-  return (...args: Parameters<T>) => {
+  const wrapped = (...args: Parameters<T>) => {
     lastArgs = args;
     if (!scheduled) {
       scheduled = true;
-      requestAnimationFrame(() => {
+      rafId = requestAnimationFrame(() => {
         scheduled = false;
         if (lastArgs) {
           fn(...lastArgs);
@@ -82,6 +69,12 @@ export function rafSchedule<T extends (...args: unknown[]) => void>(fn: T): (...
       });
     }
   };
+  wrapped.cancel = () => {
+    cancelAnimationFrame(rafId);
+    scheduled = false;
+    lastArgs = null;
+  };
+  return wrapped;
 }
 
 export function loadFromStorage<T>(key: string, defaultValue: T): T {
@@ -101,22 +94,30 @@ export function loadFromStorage<T>(key: string, defaultValue: T): T {
   return defaultValue;
 }
 
-export function saveToStorage<T>(key: string, value: T): void {
+export function saveToStorage<T>(key: string, value: T): boolean {
   try {
     localStorage.setItem(key, JSON.stringify(value));
+    return true;
   } catch (e) {
-    console.warn(`Failed to save ${key} to storage:`, e);
+    if (isQuotaError(e)) {
+      markStorageQuotaExceeded();
+    } else {
+      console.warn(`Failed to save ${key} to storage:`, e);
+    }
+    return false;
   }
 }
 
 export function generateId(): string {
-  return `id-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+  return `id-${crypto.randomUUID()}`;
 }
 
+/** Breakpoint (px): below this width the app uses the simplified mobile layout. Must match CSS @media (max-width: …). */
+export const MOBILE_BREAKPOINT_PX = 768;
+
+/** True when viewport is below mobile breakpoint. Touch-capable notebooks keep desktop layout. */
 export function isMobileDevice(): boolean {
-  const isMobileWidth = window.innerWidth < 768;
-  const isTouchDevice = window.matchMedia('(pointer: coarse)').matches;
-  return isMobileWidth || isTouchDevice;
+  return window.innerWidth <= MOBILE_BREAKPOINT_PX;
 }
 
 export function chunkArray<T>(items: T[], size: number): T[][] {
@@ -128,10 +129,39 @@ export function chunkArray<T>(items: T[], size: number): T[][] {
   return chunks;
 }
 
-export { proxyUrl, fetchWithProxy } from './proxy';
-export { exportToJSON, exportToCSV, ExportPanel } from './export';
-export { buildMapUrl, parseMapUrlState } from './urlState';
+export function toUniqueSorted(items: string[]): string[] {
+  return Array.from(new Set(items)).sort();
+}
+
+export function toUniqueSortedLowercase(items: string[]): string[] {
+  return toUniqueSorted(items.map((item) => item.toLowerCase()));
+}
+
+export function shuffle<T>(arr: T[]): T[] {
+  const a = [...arr];
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    const tmp = a[i] as T;
+    a[i] = a[j] as T;
+    a[j] = tmp;
+  }
+  return a;
+}
+
+export { proxyUrl, fetchWithProxy, hasNoStoreCacheDirective, rssProxyUrl } from './proxy';
+export { buildMapUrl, parseMapUrlState, readDashboardSearchQuery, urlHasAsyncFlyTo, withMapCentreOf, withUrlFragment, withoutVariantScopedUrlState } from './urlState';
+export { DASHBOARD_SEARCH_QUERY_MAX_CHARS } from './urlState';
+export { withTimeout, TimeoutError } from './with-timeout';
 export type { ParsedMapUrlState } from './urlState';
 export { CircuitBreaker, createCircuitBreaker, getCircuitBreakerStatus, getCircuitBreakerCooldownInfo } from './circuit-breaker';
 export type { CircuitBreakerOptions } from './circuit-breaker';
 export * from './analysis-constants';
+export { getCSSColor, invalidateColorCache } from './theme-colors';
+export { getCurrentTheme, setTheme, applyStoredTheme, getThemePreference, setThemePreference } from './theme-manager';
+export type { Theme, ThemePreference } from './theme-manager';
+export { toFlagEmoji } from './country-flag';
+export { showToast } from './toast';
+
+import { getCurrentLanguageTag } from '../services/i18n';
+import { isQuotaError, markStorageQuotaExceeded } from './storage-quota';
+export { isStorageQuotaExceeded, isQuotaError, markStorageQuotaExceeded } from './storage-quota';

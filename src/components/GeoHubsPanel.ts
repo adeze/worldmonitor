@@ -1,6 +1,9 @@
 import { Panel } from './Panel';
 import type { GeoHubActivity } from '@/services/geo-activity';
-import { escapeHtml, sanitizeUrl } from '@/utils/sanitize';
+import { escapeHtml, sanitizeUrl, unsafeRawHtml } from '@/utils/sanitize';
+import { t } from '@/services/i18n';
+import { getCSSColor } from '@/utils';
+import { bindActivationKeys } from '@/utils/activation';
 
 const COUNTRY_FLAGS: Record<string, string> = {
   'USA': '🇺🇸', 'Russia': '🇷🇺', 'China': '🇨🇳', 'UK': '🇬🇧', 'Belgium': '🇧🇪',
@@ -33,23 +36,16 @@ export class GeoHubsPanel extends Panel {
   constructor() {
     super({
       id: 'geo-hubs',
-      title: 'Geopolitical Hotspots',
+      title: t('panels.geoHubs'),
       showCount: true,
-      infoTooltip: `
-        <strong>Geopolitical Activity Hubs</strong><br>
-        Shows regions with the most news activity.<br><br>
-        <em>Hub types:</em><br>
-        • 🏛️ Capitals — World capitals and government centers<br>
-        • ⚔️ Conflict Zones — Active conflict areas<br>
-        • ⚓ Strategic — Chokepoints and key regions<br>
-        • 🏢 Organizations — UN, NATO, IAEA, etc.<br><br>
-        <em>Activity levels:</em><br>
-        • <span style="color: #ff4444">High</span> — Breaking news or 70+ score<br>
-        • <span style="color: #ff8844">Elevated</span> — Score 40-69<br>
-        • <span style="color: #888">Low</span> — Score below 40<br><br>
-        Click a hub to zoom to its location.
-      `,
+      infoTooltip: t('components.geoHubs.infoTooltip', {
+        highColor: getCSSColor('--semantic-critical'),
+        elevatedColor: getCSSColor('--semantic-high'),
+        lowColor: getCSSColor('--text-dim'),
+      }),
     });
+    this.setupDelegatedListeners();
+    bindActivationKeys(this.content, '.geo-hub-item');
   }
 
   public setOnHubClick(handler: (hub: GeoHubActivity) => void): void {
@@ -76,7 +72,7 @@ export class GeoHubsPanel extends Panel {
 
   private render(): void {
     if (this.activities.length === 0) {
-      this.showError('No active geopolitical hubs');
+      this.showError(t('common.noActiveGeoHubs'));
       return;
     }
 
@@ -86,7 +82,7 @@ export class GeoHubsPanel extends Panel {
       const topStory = hub.topStories[0];
 
       return `
-        <div class="geo-hub-item ${hub.activityLevel}" data-hub-id="${escapeHtml(hub.hubId)}" data-index="${index}">
+        <div class="geo-hub-item ${hub.activityLevel}" data-hub-id="${escapeHtml(hub.hubId)}" data-index="${index}" role="button" tabindex="0">
           <div class="hub-rank">${index + 1}</div>
           <span class="geo-hub-indicator ${hub.activityLevel}"></span>
           <div class="hub-info">
@@ -96,7 +92,7 @@ export class GeoHubsPanel extends Panel {
               ${breakingTag}
             </div>
             <div class="hub-meta">
-              <span class="hub-news-count">${hub.newsCount} ${hub.newsCount === 1 ? 'story' : 'stories'}</span>
+              <span class="hub-news-count">${hub.newsCount} ${hub.newsCount === 1 ? t('components.geoHubs.story') : t('components.geoHubs.stories')}</span>
               ${trendIcon ? `<span class="hub-trend ${hub.trend}">${trendIcon}</span>` : ''}
               <span class="geo-hub-type">${this.getTypeIcon(hub.type)} ${this.getTypeLabel(hub.type)}</span>
             </div>
@@ -111,20 +107,23 @@ export class GeoHubsPanel extends Panel {
       `;
     }).join('');
 
-    this.setContent(html);
-    this.bindEvents();
+    this.setSafeContent(unsafeRawHtml(html, 'legacy Panel.setContent() migration'));
   }
 
-  private bindEvents(): void {
-    const items = this.content.querySelectorAll<HTMLDivElement>('.geo-hub-item');
-    items.forEach((item) => {
-      item.addEventListener('click', () => {
-        const hubId = item.dataset.hubId;
-        const hub = this.activities.find(a => a.hubId === hubId);
-        if (hub && this.onHubClick) {
-          this.onHubClick(hub);
-        }
-      });
+  /**
+   * Attach a single delegated click listener on the container so that
+   * re-renders (which replace innerHTML) never accumulate listeners.
+   */
+  private setupDelegatedListeners(): void {
+    this.content.addEventListener('click', (e: Event) => {
+      const target = e.target as HTMLElement;
+      const item = target.closest<HTMLDivElement>('.geo-hub-item');
+      if (!item) return;
+      const hubId = item.dataset.hubId;
+      const hub = this.activities.find(a => a.hubId === hubId);
+      if (hub && this.onHubClick) {
+        this.onHubClick(hub);
+      }
     });
   }
 }

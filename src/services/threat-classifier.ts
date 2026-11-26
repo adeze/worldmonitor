@@ -1,17 +1,11 @@
-export type ThreatLevel = 'critical' | 'high' | 'medium' | 'low' | 'info';
+export type { ThreatLevel, EventCategory, ThreatClassification } from '@/types';
+import type { ThreatLevel, EventCategory, ThreatClassification } from '@/types';
 
-export type EventCategory =
-  | 'conflict' | 'protest' | 'disaster' | 'diplomatic' | 'economic'
-  | 'terrorism' | 'cyber' | 'health' | 'environmental' | 'military'
-  | 'crime' | 'infrastructure' | 'tech' | 'general';
+import { getCSSColor } from '@/utils';
+import { getRpcBaseUrl, getRpcErrorStatusCode } from '@/services/rpc-client';
+import { premiumFetch } from '@/services/premium-fetch';
 
-export interface ThreatClassification {
-  level: ThreatLevel;
-  category: EventCategory;
-  confidence: number;
-  source: 'keyword' | 'ml' | 'llm';
-}
-
+/** @deprecated Use getThreatColor() instead for runtime CSS variable reads */
 export const THREAT_COLORS: Record<ThreatLevel, string> = {
   critical: '#ef4444',
   high: '#f97316',
@@ -19,6 +13,18 @@ export const THREAT_COLORS: Record<ThreatLevel, string> = {
   low: '#22c55e',
   info: '#3b82f6',
 };
+
+const THREAT_VAR_MAP: Record<ThreatLevel, string> = {
+  critical: '--threat-critical',
+  high: '--threat-high',
+  medium: '--threat-medium',
+  low: '--threat-low',
+  info: '--threat-info',
+};
+
+export function getThreatColor(level: string): string {
+  return getCSSColor(THREAT_VAR_MAP[level as ThreatLevel] || '--text-dim');
+}
 
 export const THREAT_PRIORITY: Record<ThreatLevel, number> = {
   critical: 5,
@@ -36,296 +42,193 @@ export const THREAT_LABELS: Record<ThreatLevel, string> = {
   info: 'INFO',
 };
 
-type KeywordMap = Record<string, EventCategory>;
+// The keyword tables and the cascade live in shared/threat-keyword-classifier.ts
+// (#7526) so server surfaces that must agree with the browser — the country
+// coverage RPC — label a headline identically instead of keeping a second copy.
+// Re-exported here so every existing caller keeps its import path.
+export { classifyByKeyword } from '../../shared/threat-keyword-classifier';
+import type {
+  ThreatLevel as SharedThreatLevel,
+  EventCategory as SharedEventCategory,
+  ThreatClassification as SharedThreatClassification,
+} from '../../shared/threat-keyword-classifier';
 
-const CRITICAL_KEYWORDS: KeywordMap = {
-  'nuclear strike': 'military',
-  'nuclear attack': 'military',
-  'nuclear war': 'military',
-  'invasion': 'conflict',
-  'declaration of war': 'conflict',
-  'martial law': 'military',
-  'coup': 'military',
-  'coup attempt': 'military',
-  'genocide': 'conflict',
-  'ethnic cleansing': 'conflict',
-  'chemical attack': 'terrorism',
-  'biological attack': 'terrorism',
-  'dirty bomb': 'terrorism',
-  'mass casualty': 'conflict',
-  'pandemic declared': 'health',
-  'health emergency': 'health',
-  'nato article 5': 'military',
-  'evacuation order': 'disaster',
-  'meltdown': 'disaster',
-  'nuclear meltdown': 'disaster',
+// The shared module declares its own unions because shared/ cannot import the
+// '@/types' alias. These assertions fail typecheck the moment the two drift, so
+// the duplication cannot silently become a divergence.
+type Exact<A, B> = [A] extends [B] ? ([B] extends [A] ? true : never) : never;
+const _threatLevelsAgree: Exact<ThreatLevel, SharedThreatLevel> = true;
+const _eventCategoriesAgree: Exact<EventCategory, SharedEventCategory> = true;
+const _classificationsAgree: Exact<ThreatClassification, SharedThreatClassification> = true;
+void _threatLevelsAgree;
+void _eventCategoriesAgree;
+void _classificationsAgree;
+
+// Batched AI classification — collects headlines then fires parallel classifyEvent RPCs
+import type { ClassifyEventResponse } from '@/generated/client/worldmonitor/intelligence/v1/service_client';
+import { createCircuitBreaker } from '@/utils';
+import { IntelligenceServiceClient } from '@/services/generated-rpc-clients';
+import {
+  canAttemptAiClassification,
+  configureClassifyGate,
+  suppressAiClassification,
+} from '@/services/classify-gate';
+import { hasPremiumAccess } from '@/services/panel-gating';
+
+const classifyClient = new IntelligenceServiceClient(getRpcBaseUrl(), { fetch: premiumFetch });
+
+// #4865: classify-event is premium-gated server-side (#4779). Gate every
+// enqueue on the client-side entitlement signal so anon/free principals fall
+// back to keyword classification with ZERO network attempts — before this
+// gate, every incoming headline fired an RPC that 401/403'd (~570k wasted
+// requests/day). panel-gating's hasPremiumAccess is the dual-signal source
+// of truth (API key, tester keys, Clerk role, Convex entitlement).
+configureClassifyGate(() => hasPremiumAccess());
+
+const classifyBreaker = createCircuitBreaker<ThreatClassification | null>({
+  name: 'AIClassify',
+  cacheTtlMs: 6 * 60 * 60 * 1000,
+  persistCache: true,
+  maxCacheEntries: 256,
+});
+
+const VALID_LEVELS: Record<string, ThreatLevel> = {
+  critical: 'critical', high: 'high', medium: 'medium', low: 'low', info: 'info',
 };
 
-const HIGH_KEYWORDS: KeywordMap = {
-  'war': 'conflict',
-  'armed conflict': 'conflict',
-  'airstrike': 'conflict',
-  'air strike': 'conflict',
-  'drone strike': 'conflict',
-  'missile': 'military',
-  'missile launch': 'military',
-  'troops deployed': 'military',
-  'military escalation': 'military',
-  'bombing': 'conflict',
-  'casualties': 'conflict',
-  'hostage': 'terrorism',
-  'terrorist': 'terrorism',
-  'terror attack': 'terrorism',
-  'assassination': 'crime',
-  'cyber attack': 'cyber',
-  'ransomware': 'cyber',
-  'data breach': 'cyber',
-  'sanctions': 'economic',
-  'embargo': 'economic',
-  'earthquake': 'disaster',
-  'tsunami': 'disaster',
-  'hurricane': 'disaster',
-  'typhoon': 'disaster',
-};
-
-const MEDIUM_KEYWORDS: KeywordMap = {
-  'protest': 'protest',
-  'protests': 'protest',
-  'riot': 'protest',
-  'riots': 'protest',
-  'unrest': 'protest',
-  'demonstration': 'protest',
-  'strike action': 'protest',
-  'military exercise': 'military',
-  'naval exercise': 'military',
-  'arms deal': 'military',
-  'weapons sale': 'military',
-  'diplomatic crisis': 'diplomatic',
-  'ambassador recalled': 'diplomatic',
-  'expel diplomats': 'diplomatic',
-  'trade war': 'economic',
-  'tariff': 'economic',
-  'recession': 'economic',
-  'inflation': 'economic',
-  'market crash': 'economic',
-  'flood': 'disaster',
-  'flooding': 'disaster',
-  'wildfire': 'disaster',
-  'volcano': 'disaster',
-  'eruption': 'disaster',
-  'outbreak': 'health',
-  'epidemic': 'health',
-  'infection spread': 'health',
-  'oil spill': 'environmental',
-  'pipeline explosion': 'infrastructure',
-  'blackout': 'infrastructure',
-  'power outage': 'infrastructure',
-  'internet outage': 'infrastructure',
-  'derailment': 'infrastructure',
-};
-
-const LOW_KEYWORDS: KeywordMap = {
-  'election': 'diplomatic',
-  'vote': 'diplomatic',
-  'referendum': 'diplomatic',
-  'summit': 'diplomatic',
-  'treaty': 'diplomatic',
-  'agreement': 'diplomatic',
-  'negotiation': 'diplomatic',
-  'talks': 'diplomatic',
-  'peacekeeping': 'diplomatic',
-  'humanitarian aid': 'diplomatic',
-  'ceasefire': 'diplomatic',
-  'peace treaty': 'diplomatic',
-  'climate change': 'environmental',
-  'emissions': 'environmental',
-  'pollution': 'environmental',
-  'deforestation': 'environmental',
-  'drought': 'environmental',
-  'vaccine': 'health',
-  'vaccination': 'health',
-  'disease': 'health',
-  'virus': 'health',
-  'public health': 'health',
-  'covid': 'health',
-  'interest rate': 'economic',
-  'gdp': 'economic',
-  'unemployment': 'economic',
-  'regulation': 'economic',
-};
-
-const TECH_HIGH_KEYWORDS: KeywordMap = {
-  'major outage': 'infrastructure',
-  'service down': 'infrastructure',
-  'global outage': 'infrastructure',
-  'zero-day': 'cyber',
-  'critical vulnerability': 'cyber',
-  'supply chain attack': 'cyber',
-  'mass layoff': 'economic',
-};
-
-const TECH_MEDIUM_KEYWORDS: KeywordMap = {
-  'outage': 'infrastructure',
-  'breach': 'cyber',
-  'hack': 'cyber',
-  'vulnerability': 'cyber',
-  'layoff': 'economic',
-  'layoffs': 'economic',
-  'antitrust': 'economic',
-  'monopoly': 'economic',
-  'ban': 'economic',
-  'shutdown': 'infrastructure',
-};
-
-const TECH_LOW_KEYWORDS: KeywordMap = {
-  'ipo': 'economic',
-  'funding': 'economic',
-  'acquisition': 'economic',
-  'merger': 'economic',
-  'launch': 'tech',
-  'release': 'tech',
-  'update': 'tech',
-  'partnership': 'economic',
-  'startup': 'tech',
-  'ai model': 'tech',
-  'open source': 'tech',
-};
-
-const EXCLUSIONS = [
-  'protein', 'couples', 'relationship', 'dating', 'diet', 'fitness',
-  'recipe', 'cooking', 'shopping', 'fashion', 'celebrity', 'movie',
-  'tv show', 'sports', 'game', 'concert', 'festival', 'wedding',
-  'vacation', 'travel tips', 'life hack', 'self-care', 'wellness',
-];
-
-const SHORT_KEYWORDS = new Set([
-  'war', 'coup', 'ban', 'vote', 'riot', 'riots', 'hack', 'talks', 'ipo', 'gdp',
-  'virus', 'disease', 'flood',
-]);
-
-const keywordRegexCache = new Map<string, RegExp>();
-
-function getKeywordRegex(kw: string): RegExp {
-  let re = keywordRegexCache.get(kw);
-  if (!re) {
-    re = SHORT_KEYWORDS.has(kw)
-      ? new RegExp(`\\b${kw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`)
-      : new RegExp(kw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
-    keywordRegexCache.set(kw, re);
-  }
-  return re;
+function toThreat(resp: ClassifyEventResponse): ThreatClassification | null {
+  const c = resp.classification;
+  if (!c) return null;
+  // Raw level preserved in subcategory by the handler
+  const level = VALID_LEVELS[c.subcategory] ?? VALID_LEVELS[c.category] ?? null;
+  if (!level) return null;
+  return {
+    level,
+    category: c.category as EventCategory,
+    confidence: c.confidence || 0.9,
+    source: 'llm',
+  };
 }
 
-function matchKeywords(
-  titleLower: string,
-  keywords: KeywordMap
-): { keyword: string; category: EventCategory } | null {
-  for (const [kw, cat] of Object.entries(keywords)) {
-    if (getKeywordRegex(kw).test(titleLower)) {
-      return { keyword: kw, category: cat };
-    }
-  }
-  return null;
-}
+type BatchJob = {
+  title: string;
+  variant: string;
+  resolve: (v: ThreatClassification | null) => void;
+  attempts?: number;
+};
 
-export function classifyByKeyword(title: string, variant = 'full'): ThreatClassification {
-  const lower = title.toLowerCase();
-
-  if (EXCLUSIONS.some(ex => lower.includes(ex))) {
-    return { level: 'info', category: 'general', confidence: 0.3, source: 'keyword' };
-  }
-
-  const isTech = variant === 'tech';
-
-  // Priority cascade: critical → high → medium → low → info
-  let match = matchKeywords(lower, CRITICAL_KEYWORDS);
-  if (match) return { level: 'critical', category: match.category, confidence: 0.9, source: 'keyword' };
-
-  match = matchKeywords(lower, HIGH_KEYWORDS);
-  if (match) return { level: 'high', category: match.category, confidence: 0.8, source: 'keyword' };
-
-  if (isTech) {
-    match = matchKeywords(lower, TECH_HIGH_KEYWORDS);
-    if (match) return { level: 'high', category: match.category, confidence: 0.75, source: 'keyword' };
-  }
-
-  match = matchKeywords(lower, MEDIUM_KEYWORDS);
-  if (match) return { level: 'medium', category: match.category, confidence: 0.7, source: 'keyword' };
-
-  if (isTech) {
-    match = matchKeywords(lower, TECH_MEDIUM_KEYWORDS);
-    if (match) return { level: 'medium', category: match.category, confidence: 0.65, source: 'keyword' };
-  }
-
-  match = matchKeywords(lower, LOW_KEYWORDS);
-  if (match) return { level: 'low', category: match.category, confidence: 0.6, source: 'keyword' };
-
-  if (isTech) {
-    match = matchKeywords(lower, TECH_LOW_KEYWORDS);
-    if (match) return { level: 'low', category: match.category, confidence: 0.55, source: 'keyword' };
-  }
-
-  return { level: 'info', category: 'general', confidence: 0.3, source: 'keyword' };
-}
-
-// Batched AI classification — collects headlines then sends one API call
 const BATCH_SIZE = 20;
 const BATCH_DELAY_MS = 500;
+const STAGGER_BASE_MS = 2100;
+const STAGGER_JITTER_MS = 200;
+const MIN_GAP_MS = 2000;
+const MAX_RETRIES = 2;
+const MAX_QUEUE_LENGTH = 100;
+const BASE_PAUSE_MS = 60_000;
+const MAX_PAUSE_MS = 300_000;
 let batchPaused = false;
+let batchInFlight = false;
 let batchTimer: ReturnType<typeof setTimeout> | null = null;
-const batchQueue: Array<{ title: string; variant: string; resolve: (v: ThreatClassification | null) => void }> = [];
+let lastRequestAt = 0;
+let consecutive429s = 0;
+const batchQueue: BatchJob[] = [];
+
+async function waitForGap(): Promise<void> {
+  const elapsed = Date.now() - lastRequestAt;
+  if (elapsed < MIN_GAP_MS) {
+    await new Promise<void>(r => setTimeout(r, MIN_GAP_MS - elapsed));
+  }
+  const jitter = Math.floor(Math.random() * STAGGER_JITTER_MS * 2) - STAGGER_JITTER_MS;
+  const extra = Math.max(0, STAGGER_BASE_MS - MIN_GAP_MS + jitter);
+  if (extra > 0) await new Promise<void>(r => setTimeout(r, extra));
+  lastRequestAt = Date.now();
+}
 
 function flushBatch(): void {
-  if (batchPaused || batchQueue.length === 0) return;
   batchTimer = null;
+  if (batchPaused || batchInFlight || batchQueue.length === 0) return;
+  batchInFlight = true;
 
   const batch = batchQueue.splice(0, BATCH_SIZE);
-  if (batch.length === 0) return;
-  const variant = batch[0]!.variant;
-  const titles = batch.map(j => j.title);
+  if (batch.length === 0) { batchInFlight = false; return; }
 
-  fetch('/api/classify-batch', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ titles, variant }),
-  })
-    .then(resp => {
-      if (resp.status === 429 || resp.status >= 500) {
-        batchPaused = true;
-        const delay = resp.status === 429 ? 60_000 : 30_000;
-        console.warn(`[Classify] ${resp.status} — pausing AI classification for ${delay / 1000}s`);
-        for (const job of batch) job.resolve(null);
-        while (batchQueue.length > 0) batchQueue.shift()!.resolve(null);
-        setTimeout(() => { batchPaused = false; scheduleBatch(); }, delay);
-        return null;
-      }
-      if (!resp.ok) { for (const job of batch) job.resolve(null); return null; }
-      return resp.json();
-    })
-    .then(data => {
-      if (!data) return;
-      const results: Array<{ level?: string; category?: string } | null> = data.results || [];
+  (async () => {
+    try {
       for (let i = 0; i < batch.length; i++) {
-        const r = results[i];
         const job = batch[i]!;
-        if (r && r.level && r.category) {
-          job.resolve({
-            level: r.level as ThreatLevel,
-            category: r.category as EventCategory,
-            confidence: 0.9,
-            source: 'llm',
+        if (batchPaused) { job.resolve(null); continue; }
+
+        await waitForGap();
+
+        try {
+          const resp = await classifyClient.classifyEvent({
+            title: job.title, description: '', source: '', country: '',
           });
-        } else {
+          consecutive429s = 0;
+          job.resolve(toThreat(resp));
+        } catch (err) {
+          const statusCode = getRpcErrorStatusCode(err);
+          if (statusCode === 403) {
+            // #4865: a 403 is a deterministic entitlement rejection for this
+            // principal — retrying per headline recreated the flood (the
+            // pre-fix loop resolved null and kept firing at full cadence).
+            // Suppress ALL attempts for the gate window, drain everything to
+            // the keyword fallback, and let the gate re-probe after the
+            // window (self-heals a mid-session upgrade).
+            suppressAiClassification();
+            console.warn('[Classify] 403 (subscription required) — AI classification suppressed, falling back to keyword classification');
+            job.resolve(null);
+            for (const rest of batch.slice(i + 1)) rest.resolve(null);
+            for (const queued of batchQueue.splice(0)) queued.resolve(null);
+            batchInFlight = false;
+            return;
+          }
+          if (statusCode === 401 || statusCode === 429 || (statusCode !== undefined && statusCode >= 500)) {
+            batchPaused = true;
+            let delay: number;
+            if (statusCode === 401) {
+              delay = 120_000;
+            } else if (statusCode === 429) {
+              consecutive429s++;
+              delay = Math.min(BASE_PAUSE_MS * 2 ** (consecutive429s - 1), MAX_PAUSE_MS);
+            } else {
+              delay = 30_000;
+            }
+            console.warn(`[Classify] ${statusCode} — pausing AI classification for ${delay / 1000}s (backoff #${consecutive429s})`);
+            const remaining = batch.slice(i + 1);
+            if ((job.attempts ?? 0) < MAX_RETRIES) {
+              job.attempts = (job.attempts ?? 0) + 1;
+              batchQueue.unshift(job);
+            } else {
+              job.resolve(null);
+            }
+            for (let j = remaining.length - 1; j >= 0; j--) {
+              batchQueue.unshift(remaining[j]!);
+            }
+            // On repeated 429s, drop excess queue to avoid hammering on resume
+            if (consecutive429s >= 2 && batchQueue.length > BATCH_SIZE) {
+              const dropped = batchQueue.splice(BATCH_SIZE);
+              for (const d of dropped) d.resolve(null);
+              console.warn(`[Classify] Dropped ${dropped.length} queued items after repeated 429s`);
+            }
+            batchInFlight = false;
+            setTimeout(() => { batchPaused = false; scheduleBatch(); }, delay);
+            return;
+          }
           job.resolve(null);
         }
       }
-    })
-    .catch(() => { for (const job of batch) job.resolve(null); })
-    .finally(() => scheduleBatch());
+    } finally {
+      if (batchInFlight) {
+        batchInFlight = false;
+        scheduleBatch();
+      }
+    }
+  })();
 }
 
 function scheduleBatch(): void {
-  if (batchTimer || batchPaused || batchQueue.length === 0) return;
+  if (batchTimer || batchPaused || batchInFlight || batchQueue.length === 0) return;
   if (batchQueue.length >= BATCH_SIZE) {
     flushBatch();
   } else {
@@ -333,14 +236,38 @@ function scheduleBatch(): void {
   }
 }
 
-export function classifyWithAI(
+function classifyWithAIUncached(
   title: string,
   variant: string
 ): Promise<ThreatClassification | null> {
   return new Promise((resolve) => {
+    // #4865: entitlement gate — anon/free principals (and any principal
+    // inside the post-403 suppression window) resolve straight to null so
+    // callers keep their keyword classification. No request is made.
+    if (!canAttemptAiClassification()) {
+      resolve(null);
+      return;
+    }
+    if (batchQueue.length >= MAX_QUEUE_LENGTH) {
+      console.warn(`[Classify] Queue full (${MAX_QUEUE_LENGTH}), dropping classification for: ${title.slice(0, 60)}`);
+      resolve(null);
+      return;
+    }
     batchQueue.push({ title, variant, resolve });
     scheduleBatch();
   });
+}
+
+export function classifyWithAI(
+  title: string,
+  variant: string,
+): Promise<ThreatClassification | null> {
+  const cacheKey = title.trim().toLowerCase().replace(/\s+/g, ' ');
+  return classifyBreaker.execute(
+    () => classifyWithAIUncached(title, variant),
+    null,
+    { cacheKey, shouldCache: (result) => result !== null },
+  );
 }
 
 export function aggregateThreats(

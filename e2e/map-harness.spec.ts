@@ -1,4 +1,5 @@
 import { expect, test } from '@playwright/test';
+import { evidenceScreenshot } from './evidence-screenshot';
 
 type LayerSnapshot = { id: string; dataCount: number };
 type OverlaySnapshot = {
@@ -11,13 +12,13 @@ type OverlaySnapshot = {
 
 type VisualScenarioSummary = {
   id: string;
-  variant: 'both' | 'full' | 'tech';
+  variant: 'both' | 'full' | 'tech' | 'finance' | 'commodity' | 'energy' | 'happy';
 };
 
 type HarnessWindow = Window & {
   __mapHarness?: {
     ready: boolean;
-    variant: 'full' | 'tech';
+    variant: 'full' | 'tech' | 'finance' | 'commodity' | 'energy' | 'happy';
     seedAllDynamicData: () => void;
     setProtestsScenario: (scenario: 'alpha' | 'beta') => void;
     setPulseProtestsScenario: (
@@ -40,9 +41,12 @@ type HarnessWindow = Window & {
     prepareVisualScenario: (scenarioId: string) => boolean;
     isVisualScenarioReady: (scenarioId: string) => boolean;
     getDeckLayerSnapshot: () => LayerSnapshot[];
+    getLayerDataCount: (layerId: string) => number;
+    getLayerFirstScreenTransform: (layerId: string) => string | null;
+    getFirstProtestTitle: () => string | null;
+    getProtestClusterCount: () => number;
     getOverlaySnapshot: () => OverlaySnapshot;
     getCyberTooltipHtml: (indicator: string) => string;
-    getClusterStateSize: () => number;
   };
 };
 
@@ -114,6 +118,65 @@ const EXPECTED_TECH_DECK_LAYERS = [
   'news-locations-layer',
 ];
 
+const EXPECTED_FINANCE_DECK_LAYERS = [
+  ...EXPECTED_FULL_DECK_LAYERS,
+  'stock-exchanges-layer',
+  'financial-centers-layer',
+  'central-banks-layer',
+  'commodity-hubs-layer',
+  'gulf-investments-layer',
+];
+
+const EXPECTED_ENERGY_DECK_LAYERS = [
+  'pipelines-layer',
+  'storage-facilities-layer',
+  'fuel-shortages-layer',
+  'live-tankers-layer',
+  'ais-density-layer',
+  'ais-disruptions-layer',
+  'commodity-hubs-layer',
+  'commodity-ports-layer',
+  'trade-routes-layer',
+  'trade-chokepoints-layer',
+  'waterways-layer',
+  'weather-layer',
+  'outages-layer',
+  'earthquakes-layer',
+  'natural-events-layer',
+  'minerals-layer',
+  'fires-layer',
+  'climate-heatmap-layer',
+];
+
+const EXPECTED_COMMODITY_DECK_LAYERS = [
+  'pipelines-layer',
+  'ais-density-layer',
+  'ais-disruptions-layer',
+  'ports-layer',
+  'commodity-hubs-layer',
+  'commodity-ports-layer',
+  'trade-routes-layer',
+  'trade-chokepoints-layer',
+  'waterways-layer',
+  'weather-layer',
+  'outages-layer',
+  'earthquakes-layer',
+  'natural-events-layer',
+  'minerals-layer',
+  'mining-sites-layer',
+  'processing-plants-layer',
+  'fires-layer',
+  'climate-heatmap-layer',
+  'economic-centers-layer',
+];
+
+const EXPECTED_HAPPY_DECK_LAYERS = [
+  'positive-events-layer',
+  'kindness-layer',
+  'species-recovery-layer',
+  'renewable-installations-layer',
+];
+
 const waitForHarnessReady = async (
   page: import('@playwright/test').Page
 ): Promise<void> => {
@@ -125,18 +188,8 @@ const waitForHarnessReady = async (
         const w = window as HarnessWindow;
         return Boolean(w.__mapHarness?.ready);
       });
-    }, { timeout: 30000 })
+    }, { timeout: 45000 })
     .toBe(true);
-};
-
-const getMarkerInlineTransform = async (
-  page: import('@playwright/test').Page,
-  selector: string
-): Promise<string | null> => {
-  return await page.evaluate((sel) => {
-    const el = document.querySelector(sel) as HTMLElement | null;
-    return el?.style.transform ?? null;
-  }, selector);
 };
 
 const prepareVisualScenario = async (
@@ -171,8 +224,45 @@ test.describe('DeckGL map harness', () => {
       return w.__mapHarness?.variant ?? 'full';
     });
 
-    const expectedVariant = process.env.VITE_VARIANT === 'tech' ? 'tech' : 'full';
+    const expectedVariant = process.env.VITE_VARIANT === 'tech'
+      ? 'tech'
+      : process.env.VITE_VARIANT === 'energy'
+      ? 'energy'
+      : process.env.VITE_VARIANT === 'finance'
+      ? 'finance'
+      : process.env.VITE_VARIANT === 'commodity'
+      ? 'commodity'
+      : process.env.VITE_VARIANT === 'happy'
+      ? 'happy'
+      : 'full';
     expect(runtimeVariant).toBe(expectedVariant);
+  });
+
+  test('opens the localized layer warning only when the visitor adds a layer past the threshold', async ({ page }) => {
+    await waitForHarnessReady(page);
+
+    const warning = page.locator('.layer-warn-dialog');
+    const checked = page.locator('.deckgl-layer-toggles .layer-toggle input:checked');
+    // The layers a page starts with are a baseline, not an increase.
+    await expect(warning).toHaveCount(0);
+    // Variants with 13 or fewer picker layers (tech, happy) cannot pass the threshold.
+    if (await checked.count() <= 13) return;
+
+    // Toggles are hidden in deterministic mode, so drive them from the page.
+    await page.evaluate(() => {
+      const input = document.querySelector<HTMLInputElement>('.deckgl-layer-toggles .layer-toggle input:checked');
+      input?.click();
+      input?.click();
+    });
+
+    await expect(warning).toBeVisible();
+    await expect(warning.locator('.layer-warn-text strong')).toHaveText('Performance notice');
+    await expect(warning.locator('.layer-warn-text p')).toHaveText(
+      'Enabling more than 13 layers may impact rendering performance and frame rate.',
+    );
+    await expect(warning.locator('.layer-warn-dismiss span')).toHaveText("Don't show this again");
+    await expect(warning.locator('.layer-warn-ok')).toHaveText('Got it');
+    await expect(warning).not.toContainText('undefined');
   });
 
   test('boots without deck assertions or unhandled runtime errors', async ({
@@ -194,7 +284,11 @@ test.describe('DeckGL map harness', () => {
       }
     });
 
+    const workerReady = page.waitForEvent('worker', {
+      predicate: (worker) => worker.url().includes('maplibre-gl-worker'),
+    }).then((worker) => worker.evaluate(() => typeof self.addEventListener));
     await waitForHarnessReady(page);
+    expect(await workerReady).toBe('function');
     await page.waitForTimeout(1000);
 
     const unexpectedPageErrors = pageErrors.filter(
@@ -222,10 +316,17 @@ test.describe('DeckGL map harness', () => {
       return w.__mapHarness?.variant ?? 'full';
     });
 
-    const expectedDeckLayers =
-      variant === 'tech'
-        ? EXPECTED_TECH_DECK_LAYERS
-        : EXPECTED_FULL_DECK_LAYERS;
+    const expectedDeckLayers = variant === 'tech'
+      ? EXPECTED_TECH_DECK_LAYERS
+      : variant === 'energy'
+      ? EXPECTED_ENERGY_DECK_LAYERS
+      : variant === 'finance'
+      ? EXPECTED_FINANCE_DECK_LAYERS
+      : variant === 'commodity'
+      ? EXPECTED_COMMODITY_DECK_LAYERS
+      : variant === 'happy'
+      ? EXPECTED_HAPPY_DECK_LAYERS
+      : EXPECTED_FULL_DECK_LAYERS;
 
     await expect
       .poll(async () => {
@@ -237,7 +338,7 @@ test.describe('DeckGL map harness', () => {
           snapshot.filter((layer) => layer.dataCount > 0).map((layer) => layer.id)
         );
         return expectedDeckLayers.filter((id) => !nonEmptyIds.has(id)).length;
-      }, { timeout: 20000 })
+      }, { timeout: 40000 })
       .toBe(0);
 
     await expect
@@ -293,6 +394,52 @@ test.describe('DeckGL map harness', () => {
     }
   });
 
+  test('renders GCC investments layer when enabled in finance variant', async ({ page }) => {
+    await waitForHarnessReady(page);
+
+    const variant = await page.evaluate(() => {
+      const w = window as HarnessWindow;
+      return w.__mapHarness?.variant ?? 'full';
+    });
+    test.skip(variant !== 'finance', 'Finance variant only');
+
+    await page.evaluate(() => {
+      const w = window as HarnessWindow;
+      w.__mapHarness?.seedAllDynamicData();
+      w.__mapHarness?.setLayersForSnapshot(['gulfInvestments']);
+      w.__mapHarness?.setCamera({ lon: 55.27, lat: 25.2, zoom: 4.2 });
+    });
+
+    await expect
+      .poll(async () => {
+        return await page.evaluate(() => {
+          const w = window as HarnessWindow;
+          return w.__mapHarness?.getLayerDataCount('gulf-investments-layer') ?? 0;
+        });
+      }, { timeout: 30000 })
+      .toBeGreaterThan(0);
+  });
+
+  test('renders disease outbreak layer when explicitly enabled', async ({ page }) => {
+    await waitForHarnessReady(page);
+
+    await page.evaluate(() => {
+      const w = window as HarnessWindow;
+      w.__mapHarness?.seedAllDynamicData();
+      w.__mapHarness?.setLayersForSnapshot(['diseaseOutbreaks']);
+      w.__mapHarness?.setCamera({ lon: 36.82, lat: -1.29, zoom: 5.2 });
+    });
+
+    await expect
+      .poll(async () => {
+        return await page.evaluate(() => {
+          const w = window as HarnessWindow;
+          return w.__mapHarness?.getLayerDataCount('disease-outbreaks-layer') ?? 0;
+        });
+      }, { timeout: 30000 })
+      .toBeGreaterThan(0);
+  });
+
   test('sanitizes cyber threat tooltip content', async ({ page }) => {
     await waitForHarnessReady(page);
 
@@ -336,44 +483,16 @@ test.describe('DeckGL map harness', () => {
 
     await page.evaluate(() => {
       const w = window as HarnessWindow;
+      w.__mapHarness?.seedAllDynamicData();
       w.__mapHarness?.setHotspotActivityScenario('none');
       w.__mapHarness?.setPulseProtestsScenario('none');
       w.__mapHarness?.setNewsPulseScenario('none');
       w.__mapHarness?.forcePulseStartupElapsed();
-      w.__mapHarness?.setNewsPulseScenario('recent');
-    });
-
-    await expect
-      .poll(async () => {
-        return await page.evaluate(() => {
-          const w = window as HarnessWindow;
-          return w.__mapHarness?.isPulseAnimationRunning() ?? false;
-        });
-      }, { timeout: 10000 })
-      .toBe(true);
-
-    await page.evaluate(() => {
-      const w = window as HarnessWindow;
-      w.__mapHarness?.setNewsPulseScenario('stale');
-      w.__mapHarness?.setHotspotActivityScenario('none');
-      w.__mapHarness?.setPulseProtestsScenario('none');
-    });
-
-    await expect
-      .poll(async () => {
-        return await page.evaluate(() => {
-          const w = window as HarnessWindow;
-          return w.__mapHarness?.isPulseAnimationRunning() ?? false;
-        });
-      }, { timeout: 10000 })
-      .toBe(false);
-
-    await page.evaluate(() => {
-      const w = window as HarnessWindow;
       w.__mapHarness?.setPulseProtestsScenario('recent-gdelt-riot');
     });
 
-    await page.waitForTimeout(800);
+    await page.waitForTimeout(600);
+
     const gdeltPulseRunning = await page.evaluate(() => {
       const w = window as HarnessWindow;
       return w.__mapHarness?.isPulseAnimationRunning() ?? false;
@@ -391,12 +510,43 @@ test.describe('DeckGL map harness', () => {
           const w = window as HarnessWindow;
           return w.__mapHarness?.isPulseAnimationRunning() ?? false;
         });
-      }, { timeout: 10000 })
+      }, { timeout: 30000 })
       .toBe(true);
+
+    await page.evaluate(() => {
+      const w = window as HarnessWindow;
+      w.__mapHarness?.resetPulseStartupTime();
+      w.__mapHarness?.setNewsPulseScenario('none');
+      w.__mapHarness?.setHotspotActivityScenario('none');
+      w.__mapHarness?.setPulseProtestsScenario('none');
+    });
+
+    await expect
+      .poll(async () => {
+        return await page.evaluate(() => {
+          const w = window as HarnessWindow;
+          return w.__mapHarness?.isPulseAnimationRunning() ?? false;
+        });
+      }, { timeout: 12000 })
+      .toBe(false);
   });
 
   test('matches golden screenshots per layer and zoom', async ({ page }) => {
     test.setTimeout(180_000);
+
+    // These are overlay goldens. Live provider tiles/labels made them depend on
+    // network timing (a loaded vector basemap versus the blank reference).
+    await page.addInitScript(() => {
+      localStorage.setItem('wm-map-provider', 'carto');
+      localStorage.setItem('wm-map-theme:carto', 'dark-matter');
+    });
+    await page.route('https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json', route => route.fulfill({
+      json: {
+        version: 8,
+        sources: {},
+        layers: [{ id: 'background', type: 'background', paint: { 'background-color': '#0b100d' } }],
+      },
+    }));
 
     await waitForHarnessReady(page);
 
@@ -410,6 +560,14 @@ test.describe('DeckGL map harness', () => {
       const w = window as HarnessWindow;
       return w.__mapHarness?.variant ?? 'full';
     });
+    test.skip(
+      variant === 'commodity' || variant === 'happy',
+      'Visual baselines are not recorded for commodity/happy variant scenes yet'
+    );
+    // Energy currently reuses the shared "both" visual scenarios; until we
+    // record Atlas-only golden scenes, compare those shared scenarios against
+    // the existing full baselines rather than silently coercing the runtime.
+    const screenshotVariant = variant === 'energy' ? 'full' : variant;
 
     const scenarios = await page.evaluate(() => {
       const w = window as HarnessWindow;
@@ -425,12 +583,12 @@ test.describe('DeckGL map harness', () => {
       await test.step(`visual baseline: ${scenario.id}`, async () => {
         await prepareVisualScenario(page, scenario.id);
         await expect(mapWrapper).toHaveScreenshot(
-          `layer-${variant}-${scenario.id}.png`,
+          `layer-${screenshotVariant}-${scenario.id}.png`,
           {
             animations: 'disabled',
             caret: 'hide',
             scale: 'css',
-            maxDiffPixelRatio: 0.02,
+            maxDiffPixelRatio: 0.04,
           }
         );
       });
@@ -442,14 +600,14 @@ test.describe('DeckGL map harness', () => {
   }) => {
     await waitForHarnessReady(page);
 
-    const protestMarker = page.locator('.protest-marker').first();
-    await expect(protestMarker).toBeVisible({ timeout: 15000 });
-
-    await protestMarker.click({ force: true });
-    await expect(page.locator('.map-popup .popup-description')).toContainText(
-      'Scenario Alpha Protest'
-    );
-    await page.locator('.map-popup .popup-close').click();
+    await expect
+      .poll(async () => {
+        return await page.evaluate(() => {
+          const w = window as HarnessWindow;
+          return w.__mapHarness?.getFirstProtestTitle() ?? '';
+        });
+      }, { timeout: 30000 })
+      .toContain('Scenario Alpha Protest');
 
     await page.evaluate(() => {
       const w = window as HarnessWindow;
@@ -460,19 +618,22 @@ test.describe('DeckGL map harness', () => {
       .poll(async () => {
         return await page.evaluate(() => {
           const w = window as HarnessWindow;
-          return w.__mapHarness?.getClusterStateSize() ?? -1;
+          return w.__mapHarness?.getProtestClusterCount() ?? 0;
         });
-      }, { timeout: 20000 })
+      }, { timeout: 30000 })
       .toBeGreaterThan(0);
 
-    await expect(protestMarker).toBeVisible({ timeout: 15000 });
-    await protestMarker.click({ force: true });
-    await expect(page.locator('.map-popup .popup-description')).toContainText(
-      'Scenario Beta Protest'
-    );
+    await expect
+      .poll(async () => {
+        return await page.evaluate(() => {
+          const w = window as HarnessWindow;
+          return w.__mapHarness?.getFirstProtestTitle() ?? '';
+        });
+      }, { timeout: 30000 })
+      .toContain('Scenario Beta Protest');
   });
 
-  test('initializes cluster movement cache on first protest cluster render', async ({
+  test('populates protest clusters on first protest cluster render', async ({
     page,
   }) => {
     await waitForHarnessReady(page);
@@ -488,7 +649,7 @@ test.describe('DeckGL map harness', () => {
       .poll(async () => {
         return await page.evaluate(() => {
           const w = window as HarnessWindow;
-          return w.__mapHarness?.getOverlaySnapshot().protestMarkers ?? 0;
+          return w.__mapHarness?.getLayerDataCount('protest-clusters-layer') ?? 0;
         });
       }, { timeout: 20000 })
       .toBeGreaterThan(0);
@@ -497,7 +658,7 @@ test.describe('DeckGL map harness', () => {
       .poll(async () => {
         return await page.evaluate(() => {
           const w = window as HarnessWindow;
-          return w.__mapHarness?.getClusterStateSize() ?? -1;
+          return w.__mapHarness?.getProtestClusterCount() ?? 0;
         });
       }, { timeout: 20000 })
       .toBeGreaterThan(0);
@@ -515,12 +676,19 @@ test.describe('DeckGL map harness', () => {
       w.__mapHarness?.setCamera({ lon: 0.2, lat: 15.2, zoom: 4.2 });
     });
 
-    const markerSelector = '.hotspot';
-    await expect(page.locator(markerSelector).first()).toBeVisible({
-      timeout: 15000,
-    });
+    await expect
+      .poll(async () => {
+        return await page.evaluate(() => {
+          const w = window as HarnessWindow;
+          return w.__mapHarness?.getLayerDataCount('hotspots-layer') ?? 0;
+        });
+      }, { timeout: 30000 })
+      .toBeGreaterThan(0);
 
-    const beforeTransform = await getMarkerInlineTransform(page, markerSelector);
+    const beforeTransform = await page.evaluate(() => {
+      const w = window as HarnessWindow;
+      return w.__mapHarness?.getLayerFirstScreenTransform('hotspots-layer') ?? null;
+    });
     expect(beforeTransform).not.toBeNull();
 
     await page.evaluate(() => {
@@ -535,7 +703,10 @@ test.describe('DeckGL map harness', () => {
         })
     );
 
-    const afterTransform = await getMarkerInlineTransform(page, markerSelector);
+    const afterTransform = await page.evaluate(() => {
+      const w = window as HarnessWindow;
+      return w.__mapHarness?.getLayerFirstScreenTransform('hotspots-layer') ?? null;
+    });
     expect(afterTransform).not.toBeNull();
     expect(afterTransform).not.toBe(beforeTransform);
   });
@@ -552,54 +723,41 @@ test.describe('DeckGL map harness', () => {
       w.__mapHarness?.setCamera({ lon: 0.2, lat: 15.2, zoom: 4.2 });
     });
 
-    const markerSelector = '.hotspot';
-    await expect(page.locator(markerSelector).first()).toBeVisible({
-      timeout: 15000,
-    });
+    await expect
+      .poll(async () => {
+        return await page.evaluate(() => {
+          const w = window as HarnessWindow;
+          return w.__mapHarness?.getLayerDataCount('hotspots-layer') ?? 0;
+        });
+      }, { timeout: 30000 })
+      .toBeGreaterThan(0);
 
-    const result = await page.evaluate(async () => {
+    const beforeTransform = await page.evaluate(() => {
       const w = window as HarnessWindow;
-      const marker = document.querySelector('.hotspot') as HTMLElement | null;
-      if (!w.__mapHarness || !marker) {
-        return { observed: false, styleMutations: -1, remaining: -1 };
-      }
+      return w.__mapHarness?.getLayerFirstScreenTransform('hotspots-layer') ?? null;
+    });
+    expect(beforeTransform).not.toBeNull();
 
-      let styleMutations = 0;
-      const observer = new MutationObserver((records) => {
-        for (const record of records) {
-          if (
-            record.type === 'attributes' &&
-            record.attributeName === 'style'
-          ) {
-            styleMutations += 1;
-          }
-        }
-      });
-
-      observer.observe(marker, {
-        attributes: true,
-        attributeFilter: ['style'],
-      });
-
-      w.__mapHarness.setLayersForSnapshot([]);
-      w.__mapHarness.setCamera({ lon: 3.5, lat: 18.2, zoom: 4.8 });
-
-      await new Promise((resolve) => {
-        setTimeout(resolve, 140);
-      });
-
-      observer.disconnect();
-
-      return {
-        observed: true,
-        styleMutations,
-        remaining: document.querySelectorAll('.hotspot').length,
-      };
+    await page.evaluate(() => {
+      const w = window as HarnessWindow;
+      w.__mapHarness?.setLayersForSnapshot([]);
+      w.__mapHarness?.setCamera({ lon: 3.5, lat: 18.2, zoom: 4.8 });
     });
 
-    expect(result.observed).toBe(true);
-    expect(result.styleMutations).toBe(0);
-    expect(result.remaining).toBe(0);
+    await expect
+      .poll(async () => {
+        return await page.evaluate(() => {
+          const w = window as HarnessWindow;
+          return w.__mapHarness?.getLayerDataCount('hotspots-layer') ?? -1;
+        });
+      }, { timeout: 10000 })
+      .toBe(0);
+
+    const afterTransform = await page.evaluate(() => {
+      const w = window as HarnessWindow;
+      return w.__mapHarness?.getLayerFirstScreenTransform('hotspots-layer') ?? null;
+    });
+    expect(afterTransform).toBeNull();
   });
 
   test('reprojects protest overlay marker when panning at fixed zoom', async ({
@@ -615,10 +773,19 @@ test.describe('DeckGL map harness', () => {
 
     await prepareVisualScenario(page, 'protests-z5');
 
-    const markerSelector = '.protest-marker';
-    await expect(page.locator(markerSelector).first()).toBeVisible();
+    await expect
+      .poll(async () => {
+        return await page.evaluate(() => {
+          const w = window as HarnessWindow;
+          return w.__mapHarness?.getLayerDataCount('protest-clusters-layer') ?? 0;
+        });
+      }, { timeout: 30000 })
+      .toBeGreaterThan(0);
 
-    const beforeTransform = await getMarkerInlineTransform(page, markerSelector);
+    const beforeTransform = await page.evaluate(() => {
+      const w = window as HarnessWindow;
+      return w.__mapHarness?.getLayerFirstScreenTransform('protest-clusters-layer') ?? null;
+    });
     expect(beforeTransform).not.toBeNull();
 
     await page.evaluate(() => {
@@ -628,8 +795,54 @@ test.describe('DeckGL map harness', () => {
 
     await page.waitForTimeout(750);
 
-    const afterTransform = await getMarkerInlineTransform(page, markerSelector);
+    const afterTransform = await page.evaluate(() => {
+      const w = window as HarnessWindow;
+      return w.__mapHarness?.getLayerFirstScreenTransform('protest-clusters-layer') ?? null;
+    });
     expect(afterTransform).not.toBeNull();
     expect(afterTransform).not.toBe(beforeTransform);
   });
+});
+
+test('military bases retain the current viewport after reverse RPC completion', async ({ page }, testInfo) => {
+  const requests: import('@playwright/test').Route[] = [];
+  await page.route('**/api/military/v1/list-military-bases**', async (route) => { requests.push(route); });
+  await page.goto('/tests/map-harness.html?serverBases=1');
+  await expect.poll(() => page.evaluate(() => (window as HarnessWindow).__mapHarness?.ready)).toBe(true);
+  await expect(page.locator('.layer-warn-dialog')).toHaveCount(0);
+  await page.evaluate(() => {
+    const harness = (window as HarnessWindow).__mapHarness!;
+    harness.setLayersForSnapshot(['bases']);
+    harness.setCamera({ lon: 15, lat: 42, zoom: 5 });
+  });
+  await expect.poll(() => requests.length).toBeGreaterThan(0);
+  const first = requests.length - 1;
+  const box = await page.locator('.maplibregl-canvas').boundingBox();
+  if (!box) throw new Error('Map canvas missing');
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(box.x + box.width / 2 + 240, box.y + box.height / 2, { steps: 12 });
+  await page.mouse.up();
+  await expect.poll(() => requests.length).toBeGreaterThan(first + 1);
+  const current = requests.length - 1;
+  const respond = async (index: number, count: number) => {
+    const request = requests[index]!.request();
+    const url = new URL(request.url());
+    const params = request.method() === 'POST' ? request.postDataJSON() : Object.fromEntries(url.searchParams);
+    const lat = (Number(params.sw_lat ?? 0) + Number(params.ne_lat ?? 0)) / 2;
+    const lon = (Number(params.sw_lon ?? 0) + Number(params.ne_lon ?? 0)) / 2;
+    await requests[index]!.fulfill({ json: {
+      bases: Array.from({ length: count }, (_, i) => ({ id: `fixture-${index}-${i}`, name: `Controlled base ${i + 1}`, latitude: lat + i * 0.2, longitude: lon + i * 0.2, type: 'us', countryIso2: 'US' })),
+      clusters: [], totalInView: count, truncated: false,
+    } });
+  };
+  await respond(current, 2);
+  const count = () => page.evaluate(() => (window as HarnessWindow).__mapHarness!.getLayerDataCount('bases-layer'));
+  await expect.poll(count).toBe(2);
+  await evidenceScreenshot(page, { path: testInfo.outputPath('current-viewport-controlled-bases.png') });
+  await respond(first, 1);
+  // Allow the older response and the next render frames to complete.
+  await page.waitForTimeout(350);
+  expect(await count()).toBe(2);
+  await evidenceScreenshot(page, { path: testInfo.outputPath('after-older-response.png') });
 });

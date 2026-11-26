@@ -1,5 +1,11 @@
-import { fetchWithProxy } from '@/utils';
 import type { Hotspot } from '@/types';
+import { createLazyClient, getRpcBaseUrl } from '@/services/rpc-client';
+import { t } from '@/services/i18n';
+import type { GdeltArticle as ProtoGdeltArticle, SearchGdeltDocumentsResponse, GdeltTimelinePoint } from '@/generated/client/worldmonitor/intelligence/v1/service_client';
+import { createCircuitBreaker } from '@/utils';
+import { getHydratedData } from '@/services/bootstrap';
+import { normalizeGdeltSearchResponse, normalizeGdeltTopicSnapshot } from '../../shared/intelligence-snapshots.js';
+import { IntelligenceServiceClient } from '@/services/generated-rpc-clients';
 
 export interface GdeltArticle {
   title: string;
@@ -23,6 +29,12 @@ export interface TopicIntelligence {
   topic: IntelTopic;
   articles: GdeltArticle[];
   fetchedAt: Date;
+}
+
+export interface TopicTimeline {
+  tone: GdeltTimelinePoint[];
+  vol: GdeltTimelinePoint[];
+  fetchedAt: string;
 }
 
 export const INTEL_TOPICS: IntelTopic[] = [
@@ -57,7 +69,7 @@ export const INTEL_TOPICS: IntelTopic[] = [
   {
     id: 'intelligence',
     name: 'Intelligence',
-    query: '(espionage OR spy OR intelligence agency OR covert OR surveillance) sourcelang:eng',
+    query: '(espionage OR spy OR "intelligence agency" OR covert OR surveillance) sourcelang:eng',
     icon: '🕵️',
     description: 'Espionage, intelligence operations, surveillance',
   },
@@ -70,11 +82,108 @@ export const INTEL_TOPICS: IntelTopic[] = [
   },
 ];
 
+export const POSITIVE_GDELT_TOPICS: IntelTopic[] = [
+  {
+    id: 'science-breakthroughs',
+    name: 'Science Breakthroughs',
+    query: '(breakthrough OR discovery OR "new treatment" OR "clinical trial success") sourcelang:eng',
+    icon: '',
+    description: 'Scientific discoveries and medical advances',
+  },
+  {
+    id: 'climate-progress',
+    name: 'Climate Progress',
+    query: '(renewable energy record OR "solar installation" OR "wind farm" OR "emissions decline" OR "green hydrogen") sourcelang:eng',
+    icon: '',
+    description: 'Renewable energy milestones and climate wins',
+  },
+  {
+    id: 'conservation-wins',
+    name: 'Conservation Wins',
+    query: '(species recovery OR "population rebound" OR "conservation success" OR "habitat restored" OR "marine sanctuary") sourcelang:eng',
+    icon: '',
+    description: 'Wildlife recovery and habitat restoration',
+  },
+  {
+    id: 'humanitarian-progress',
+    name: 'Humanitarian Progress',
+    query: '(poverty decline OR "literacy rate" OR "vaccination campaign" OR "peace agreement" OR "humanitarian aid") sourcelang:eng',
+    icon: '',
+    description: 'Poverty reduction, education, and peace',
+  },
+  {
+    id: 'innovation',
+    name: 'Innovation',
+    query: '("clean technology" OR "AI healthcare" OR "3D printing" OR "electric vehicle" OR "fusion energy") sourcelang:eng',
+    icon: '',
+    description: 'Technology for good and clean innovation',
+  },
+];
+
+export function getIntelTopics(): IntelTopic[] {
+  return INTEL_TOPICS.map(topic => ({
+    ...topic,
+    name: t(`intel.topics.${topic.id}.name`),
+    description: t(`intel.topics.${topic.id}.description`),
+  }));
+}
+
+// ---- Sebuf client ----
+
+const getClient = createLazyClient(() => new IntelligenceServiceClient(getRpcBaseUrl(), { fetch: (...args) => globalThis.fetch(...args) }));
+const gdeltBreaker = createCircuitBreaker<SearchGdeltDocumentsResponse>({ name: 'GDELT Intelligence', cacheTtlMs: 10 * 60 * 1000, persistCache: true });
+const positiveGdeltBreaker = createCircuitBreaker<SearchGdeltDocumentsResponse>({ name: 'GDELT Positive', cacheTtlMs: 10 * 60 * 1000, persistCache: true });
+
+const emptyGdeltFallback: SearchGdeltDocumentsResponse = { articles: [], query: '', error: 'request-unavailable' };
+
 const CACHE_TTL = 5 * 60 * 1000;
+const STALE_MAX = 60 * 60 * 1000; // 1h ceiling — never serve cache older than this
 const articleCache = new Map<string, { articles: GdeltArticle[]; timestamp: number }>();
 
-function buildGdeltDocUrl(query: string, maxrecords = 10, timespan = '24h'): string {
-  return `/api/gdelt-doc?query=${encodeURIComponent(query)}&maxrecords=${maxrecords}&timespan=${timespan}`;
+/**
+ * An error body or malformed envelope throws inside the breaker so it counts
+ * as a failure (and opens cooldown) instead of a success. Invalid articles
+ * are dropped; the valid ones are kept.
+ */
+function validatedGdeltResponse(response: SearchGdeltDocumentsResponse): SearchGdeltDocumentsResponse {
+  const normalized = normalizeGdeltSearchResponse(response);
+  if (!normalized) throw new Error(response?.error || 'Malformed GDELT response');
+  return normalized;
+}
+
+/** Unavailable read: last-good articles within the 1h ceiling, else a throw the panel renders as an error. */
+function staleOrUnavailable(cached: { articles: GdeltArticle[]; timestamp: number } | undefined): GdeltArticle[] {
+  if (cached && Date.now() - cached.timestamp < STALE_MAX) return cached.articles;
+  throw new Error('GDELT intelligence unavailable');
+}
+const timelineCache = new Map<string, { data: TopicTimeline; timestamp: number }>();
+
+export async function fetchTopicTimeline(topicId: string): Promise<TopicTimeline | null> {
+  const cached = timelineCache.get(topicId);
+  if (cached && Date.now() - cached.timestamp < CACHE_TTL) return cached.data;
+
+  try {
+    const resp = await getClient().getGdeltTopicTimeline({ topic: topicId });
+    if (resp.error || (resp.tone.length === 0 && resp.vol.length === 0)) return null;
+    const data: TopicTimeline = { tone: resp.tone, vol: resp.vol, fetchedAt: resp.fetchedAt };
+    timelineCache.set(topicId, { data, timestamp: Date.now() });
+    return data;
+  } catch {
+    return null;
+  }
+}
+
+/** Map proto GdeltArticle (all required strings) to service GdeltArticle (optional fields) */
+function toGdeltArticle(a: ProtoGdeltArticle): GdeltArticle {
+  return {
+    title: a.title,
+    url: a.url,
+    source: a.source,
+    date: a.date,
+    image: a.image || undefined,
+    language: a.language || undefined,
+    tone: a.tone || undefined,
+  };
 }
 
 export async function fetchGdeltArticles(
@@ -82,40 +191,81 @@ export async function fetchGdeltArticles(
   maxrecords = 10,
   timespan = '24h'
 ): Promise<GdeltArticle[]> {
-  const cacheKey = `${query}:${maxrecords}:${timespan}`;
+  const cacheKey = JSON.stringify([query, maxrecords, timespan, '', '']);
   const cached = articleCache.get(cacheKey);
 
   if (cached && Date.now() - cached.timestamp < CACHE_TTL) {
     return cached.articles;
   }
 
-  try {
-    const url = buildGdeltDocUrl(query, maxrecords, timespan);
-    const response = await fetchWithProxy(url);
+  const resp = await gdeltBreaker.execute(async () => validatedGdeltResponse(await getClient().searchGdeltDocuments({
+    query,
+    maxRecords: maxrecords,
+    timespan,
+    toneFilter: '',
+    sort: '',
+  })), emptyGdeltFallback, { cacheKey, shouldCache: (response) => !response.error, maxServeAgeMs: STALE_MAX });
 
-    if (!response.ok) {
-      console.warn(`[GDELT-Intel] Failed to fetch: ${response.status}`);
-      return cached?.articles || [];
-    }
-
-    const data = await response.json();
-    const articles: GdeltArticle[] = data.articles || [];
-
-    articleCache.set(cacheKey, { articles, timestamp: Date.now() });
-    return articles;
-  } catch (error) {
-    console.error('[GDELT-Intel] Fetch error:', error);
-    return cached?.articles || [];
+  if (resp.error) {
+    console.warn(`[GDELT-Intel] RPC error: ${resp.error}`);
+    return staleOrUnavailable(cached);
   }
+
+  const articles: GdeltArticle[] = (resp.articles || []).map(toGdeltArticle);
+
+  articleCache.set(cacheKey, { articles, timestamp: Date.now() });
+  return articles;
 }
 
 export async function fetchHotspotContext(hotspot: Hotspot): Promise<GdeltArticle[]> {
-  const query = hotspot.keywords.slice(0, 5).join(' OR ');
-  return fetchGdeltArticles(query, 8, '48h');
+  return fetchGdeltArticles(selectHotspotTopicId(hotspot), 8, '48h');
+}
+
+/**
+ * The RPC serves the materializer's seeded topic identifiers. Hotspot labels
+ * are not a query language, so map them to the closest seeded topic instead
+ * of sending an unsupported concatenation of place names and keywords.
+ */
+export function selectHotspotTopicId(hotspot: Pick<Hotspot, 'name' | 'keywords' | 'description'>): string {
+  const text = [hotspot.name, hotspot.description, ...hotspot.keywords]
+    .filter((value): value is string => typeof value === 'string')
+    .join(' ')
+    .toLowerCase();
+  if (/cyber|ransomware|hack|malware|breach/.test(text)) return 'cyber';
+  if (/nuclear|uranium|iaea|reactor|enrichment/.test(text)) return 'nuclear';
+  if (/sanction|embargo|tariff|trade war/.test(text)) return 'sanctions';
+  if (/spy|espionage|intelligence|surveillance/.test(text)) return 'intelligence';
+  if (/maritime|naval|piracy|strait|shipping|\bport\b(?!-)|sea lane|south china sea|warship/.test(text)) return 'maritime';
+  return 'military';
+}
+
+let _bootstrapConsumed = false;
+const _bootstrapData = new Map<string, TopicIntelligence>();
+
+function _consumeBootstrap(): void {
+  if (_bootstrapConsumed) return;
+  _bootstrapConsumed = true;
+  // A malformed snapshot falls through to the RPC; a confirmed-empty topic is
+  // an answer, not a reason to ask again.
+  const raw = normalizeGdeltTopicSnapshot(getHydratedData('gdeltIntel'));
+  if (!raw) return;
+  const now = new Date();
+  for (const entry of raw.topics) {
+    const topic = INTEL_TOPICS.find(t => t.id === entry.id);
+    if (!topic) continue;
+    _bootstrapData.set(entry.id, { topic, articles: entry.articles.map(toGdeltArticle), fetchedAt: now });
+  }
 }
 
 export async function fetchTopicIntelligence(topic: IntelTopic): Promise<TopicIntelligence> {
-  const articles = await fetchGdeltArticles(topic.query, 10, '24h');
+  _consumeBootstrap();
+  const bootstrapped = _bootstrapData.get(topic.id);
+  if (bootstrapped) {
+    _bootstrapData.delete(topic.id);
+    // Unused hydration expires with the same 1h ceiling as the article cache.
+    if (Date.now() - bootstrapped.fetchedAt.getTime() < STALE_MAX) return bootstrapped;
+  }
+  const articles = await fetchGdeltArticles(topic.id, 10, '24h');
   return {
     topic,
     articles,
@@ -144,7 +294,7 @@ export function formatArticleDate(dateStr: string): string {
     const min = dateStr.slice(11, 13);
     const sec = dateStr.slice(13, 15);
     const date = new Date(`${year}-${month}-${day}T${hour}:${min}:${sec}Z`);
-    if (isNaN(date.getTime())) return '';
+    if (Number.isNaN(date.getTime())) return '';
 
     const now = Date.now();
     const diff = now - date.getTime();
@@ -164,4 +314,51 @@ export function extractDomain(url: string): string {
   } catch {
     return '';
   }
+}
+
+// ---- Positive GDELT queries (Happy variant) ----
+
+export async function fetchPositiveGdeltArticles(
+  query: string,
+  toneFilter = 'tone>5',
+  sort = 'ToneDesc',
+  maxrecords = 15,
+  timespan = '72h',
+): Promise<GdeltArticle[]> {
+  const cacheKey = JSON.stringify([query, maxrecords, timespan, toneFilter, sort]);
+  const cached = articleCache.get(cacheKey);
+  if (cached && Date.now() - cached.timestamp < CACHE_TTL) {
+    return cached.articles;
+  }
+
+  const resp = await positiveGdeltBreaker.execute(async () => validatedGdeltResponse(await getClient().searchGdeltDocuments({
+    query,
+    maxRecords: maxrecords,
+    timespan,
+    toneFilter,
+    sort,
+  })), emptyGdeltFallback, { cacheKey, shouldCache: (response) => !response.error, maxServeAgeMs: STALE_MAX });
+
+  if (resp.error) {
+    console.warn(`[GDELT-Intel] Positive RPC error: ${resp.error}`);
+    return staleOrUnavailable(cached);
+  }
+
+  const articles: GdeltArticle[] = (resp.articles || []).map(toGdeltArticle);
+  articleCache.set(cacheKey, { articles, timestamp: Date.now() });
+  return articles;
+}
+
+export async function fetchPositiveTopicIntelligence(topic: IntelTopic): Promise<TopicIntelligence> {
+  const articles = await fetchPositiveGdeltArticles(topic.query);
+  return { topic, articles, fetchedAt: new Date() };
+}
+
+export async function fetchAllPositiveTopicIntelligence(): Promise<TopicIntelligence[]> {
+  const results = await Promise.allSettled(
+    POSITIVE_GDELT_TOPICS.map(topic => fetchPositiveTopicIntelligence(topic))
+  );
+  return results
+    .filter((r): r is PromiseFulfilledResult<TopicIntelligence> => r.status === 'fulfilled')
+    .map(r => r.value);
 }

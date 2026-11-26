@@ -1,5 +1,9 @@
 import * as d3 from 'd3';
 import { escapeHtml } from '@/utils/sanitize';
+import { getCSSColor } from '@/utils';
+import { t } from '@/services/i18n';
+import { setTrustedHtml, trustedHtml } from '@/utils/dom-utils';
+
 
 export interface TimelineEvent {
   timestamp: number;
@@ -33,15 +37,28 @@ export class CountryTimeline {
   private svg: d3.Selection<SVGSVGElement, unknown, null, undefined> | null = null;
   private tooltip: HTMLDivElement | null = null;
   private resizeObserver: ResizeObserver | null = null;
-  private currentEvents: TimelineEvent[] = [];
+  private currentEvents: TimelineEvent[] | null = null;
+  private handleThemeChange: () => void;
 
   constructor(container: HTMLElement) {
     this.container = container;
     this.createTooltip();
     this.resizeObserver = new ResizeObserver(() => {
-      if (this.currentEvents.length > 0) this.render(this.currentEvents);
+      if (this.currentEvents !== null) this.render(this.currentEvents);
     });
     this.resizeObserver.observe(this.container);
+
+    this.handleThemeChange = () => {
+      // Re-create tooltip with new theme colors
+      if (this.tooltip) {
+        this.tooltip.remove();
+        this.tooltip = null;
+      }
+      this.createTooltip();
+      // Re-render chart with new colors
+      if (this.currentEvents !== null) this.render(this.currentEvents);
+    };
+    window.addEventListener('theme-changed', this.handleThemeChange);
   }
 
   private createTooltip(): void {
@@ -49,16 +66,16 @@ export class CountryTimeline {
     Object.assign(this.tooltip.style, {
       position: 'absolute',
       pointerEvents: 'none',
-      background: 'rgba(20, 20, 30, 0.95)',
-      border: '1px solid rgba(255, 255, 255, 0.15)',
+      background: getCSSColor('--bg'),
+      border: `1px solid ${getCSSColor('--border')}`,
       borderRadius: '6px',
       padding: '6px 10px',
-      fontSize: '12px',
-      color: 'rgba(255, 255, 255, 0.85)',
+      fontSize: 'calc(12px * var(--wm-panel-effective-scale, 1))',
+      color: getCSSColor('--text'),
       zIndex: '9999',
       display: 'none',
       whiteSpace: 'nowrap',
-      boxShadow: '0 2px 8px rgba(0,0,0,0.4)',
+      boxShadow: `0 2px 8px ${getCSSColor('--shadow-color')}`,
     });
     this.container.style.position = 'relative';
     this.container.appendChild(this.tooltip);
@@ -70,6 +87,15 @@ export class CountryTimeline {
 
     const width = this.container.clientWidth;
     if (width <= 0) return;
+
+    // Clamp timestamps to the visible 7-day domain so dots align with the
+    // axis labels they describe (issue #2973 bug 3). Events with missing or
+    // future timestamps would otherwise plot off-axis.
+    const nowMs = Date.now();
+    const domainStart = nowMs - SEVEN_DAYS_MS;
+    const visibleEvents = events
+      .filter((e) => Number.isFinite(e.timestamp) && e.timestamp >= domainStart)
+      .map((e) => (e.timestamp > nowMs ? { ...e, timestamp: nowMs } : e));
 
     const innerW = width - MARGIN.left - MARGIN.right;
     const innerH = HEIGHT - MARGIN.top - MARGIN.bottom;
@@ -85,10 +111,10 @@ export class CountryTimeline {
       .append('g')
       .attr('transform', `translate(${MARGIN.left},${MARGIN.top})`);
 
-    const now = Date.now();
+    const now = nowMs;
     const xScale = d3
       .scaleTime()
-      .domain([new Date(now - SEVEN_DAYS_MS), new Date(now)])
+      .domain([new Date(domainStart), new Date(now)])
       .range([0, innerW]);
 
     const yScale = d3
@@ -100,8 +126,8 @@ export class CountryTimeline {
     this.drawGrid(g, xScale, innerH);
     this.drawAxes(g, xScale, yScale, innerH);
     this.drawNowMarker(g, xScale, new Date(now), innerH);
-    this.drawEmptyLaneLabels(g, events, yScale, innerW);
-    this.drawEvents(g, events, xScale, yScale);
+    this.drawEmptyLaneLabels(g, visibleEvents, yScale, innerW);
+    this.drawEvents(g, visibleEvents, xScale, yScale);
   }
 
   private drawGrid(
@@ -117,7 +143,7 @@ export class CountryTimeline {
       .attr('x2', (d) => xScale(d))
       .attr('y1', 0)
       .attr('y2', innerH)
-      .attr('stroke', 'rgba(255,255,255,0.05)')
+      .attr('stroke', getCSSColor('--border-subtle'))
       .attr('stroke-width', 1);
   }
 
@@ -137,9 +163,9 @@ export class CountryTimeline {
       .attr('transform', `translate(0,${innerH})`)
       .call(xAxis);
 
-    xAxisG.selectAll('text').attr('fill', 'rgba(255,255,255,0.5)').attr('font-size', '10px');
-    xAxisG.selectAll('line').attr('stroke', 'rgba(255,255,255,0.15)');
-    xAxisG.select('.domain').attr('stroke', 'rgba(255,255,255,0.15)');
+    xAxisG.selectAll('text').attr('fill', getCSSColor('--text-dim')).style('font-size', 'calc(10px * var(--wm-panel-effective-scale, 1))');
+    xAxisG.selectAll('line').attr('stroke', getCSSColor('--border'));
+    xAxisG.select('.domain').attr('stroke', getCSSColor('--border'));
 
     const laneLabels: Record<string, string> = {
       protest: 'Protest',
@@ -156,7 +182,7 @@ export class CountryTimeline {
       .attr('text-anchor', 'end')
       .attr('dominant-baseline', 'central')
       .attr('fill', (d: TimelineEvent['lane']) => LANE_COLORS[d])
-      .attr('font-size', '11px')
+      .style('font-size', 'calc(11px * var(--wm-panel-effective-scale, 1))')
       .attr('font-weight', '500')
       .text((d: TimelineEvent['lane']) => laneLabels[d] || d);
   }
@@ -173,7 +199,7 @@ export class CountryTimeline {
       .attr('x2', x)
       .attr('y1', 0)
       .attr('y2', innerH)
-      .attr('stroke', '#ffffff')
+      .attr('stroke', getCSSColor('--text'))
       .attr('stroke-width', 1)
       .attr('stroke-dasharray', '4,3')
       .attr('opacity', 0.6);
@@ -182,9 +208,9 @@ export class CountryTimeline {
       .attr('x', x)
       .attr('y', -6)
       .attr('text-anchor', 'middle')
-      .attr('fill', 'rgba(255,255,255,0.4)')
-      .attr('font-size', '9px')
-      .text('now');
+      .attr('fill', getCSSColor('--text-muted'))
+      .style('font-size', 'calc(9px * var(--wm-panel-effective-scale, 1))')
+      .text(t('components.countryTimeline.now'));
   }
 
   private drawEmptyLaneLabels(
@@ -203,10 +229,10 @@ export class CountryTimeline {
       .attr('y', (d) => (yScale(d) ?? 0) + yScale.bandwidth() / 2)
       .attr('text-anchor', 'middle')
       .attr('dominant-baseline', 'central')
-      .attr('fill', 'rgba(255,255,255,0.2)')
-      .attr('font-size', '10px')
+      .attr('fill', getCSSColor('--text-ghost'))
+      .style('font-size', 'calc(10px * var(--wm-panel-effective-scale, 1))')
       .attr('font-style', 'italic')
-      .text('No events in 7 days');
+      .text(t('components.countryTimeline.noEventsIn7Days'));
   }
 
   private drawEvents(
@@ -228,12 +254,12 @@ export class CountryTimeline {
       .attr('fill', (d) => LANE_COLORS[d.lane])
       .attr('opacity', 0.85)
       .attr('cursor', 'pointer')
-      .attr('stroke', 'rgba(0,0,0,0.3)')
+      .attr('stroke', getCSSColor('--shadow-color'))
       .attr('stroke-width', 0.5)
       .on('mouseenter', function (event: MouseEvent, d: TimelineEvent) {
-        d3.select(this).attr('opacity', 1).attr('stroke', '#fff').attr('stroke-width', 1.5);
+        d3.select(this).attr('opacity', 1).attr('stroke', getCSSColor('--text')).attr('stroke-width', 1.5);
         const dateStr = fmt(new Date(d.timestamp));
-        tooltip.innerHTML = `<strong>${escapeHtml(d.label)}</strong><br/>${escapeHtml(dateStr)}`;
+        setTrustedHtml(tooltip, trustedHtml(`<strong>${escapeHtml(d.label)}</strong><br/>${escapeHtml(dateStr)}`, "legacy direct innerHTML migration"));
         tooltip.style.display = 'block';
         const rect = container.getBoundingClientRect();
         const x = event.clientX - rect.left + 12;
@@ -241,7 +267,7 @@ export class CountryTimeline {
         tooltip.style.left = `${x}px`;
         tooltip.style.top = `${y}px`;
       })
-      .on('mousemove', function (event: MouseEvent) {
+      .on('mousemove', (event: MouseEvent) => {
         const rect = container.getBoundingClientRect();
         const x = event.clientX - rect.left + 12;
         const y = event.clientY - rect.top - 10;
@@ -249,12 +275,13 @@ export class CountryTimeline {
         tooltip.style.top = `${y}px`;
       })
       .on('mouseleave', function () {
-        d3.select(this).attr('opacity', 0.85).attr('stroke', 'rgba(0,0,0,0.3)').attr('stroke-width', 0.5);
+        d3.select(this).attr('opacity', 0.85).attr('stroke', getCSSColor('--shadow-color')).attr('stroke-width', 0.5);
         tooltip.style.display = 'none';
       });
   }
 
   destroy(): void {
+    window.removeEventListener('theme-changed', this.handleThemeChange);
     if (this.resizeObserver) {
       this.resizeObserver.disconnect();
       this.resizeObserver = null;
@@ -267,6 +294,6 @@ export class CountryTimeline {
       this.tooltip.remove();
       this.tooltip = null;
     }
-    this.currentEvents = [];
+    this.currentEvents = null;
   }
 }

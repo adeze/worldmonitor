@@ -1,9 +1,9 @@
-import { escapeHtml } from '@/utils/sanitize';
 import { SITE_VARIANT } from '@/config';
+import { h } from '@/utils/dom-utils'; // kept for Panel base class compat
 
-type StatusLevel = 'ok' | 'warning' | 'error' | 'disabled';
+export type StatusLevel = 'ok' | 'warning' | 'error' | 'disabled';
 
-interface FeedStatus {
+export interface FeedStatus {
   name: string;
   lastUpdate: Date | null;
   status: StatusLevel;
@@ -11,10 +11,11 @@ interface FeedStatus {
   errorMessage?: string;
 }
 
-interface ApiStatus {
+export interface ApiStatus {
   name: string;
   status: StatusLevel;
   latency?: number;
+  errorMessage?: string;
 }
 
 // Allowlists for each variant
@@ -27,208 +28,216 @@ const TECH_FEEDS = new Set([
 ]);
 const TECH_APIS = new Set([
   'RSS Proxy', 'Finnhub', 'CoinGecko', 'Tech Events API', 'Service Status', 'Polymarket',
-  'Cyber Threats API'
+  'Cyber Threats API', 'Signal Aggregator'
 ]);
 
 const WORLD_FEEDS = new Set([
   'Politics', 'Middleeast', 'Tech', 'Ai', 'Finance',
   'Gov', 'Intel', 'Layoffs', 'Thinktanks', 'Energy',
   'Polymarket', 'Weather', 'NetBlocks', 'Shipping', 'Military',
-  'Cyber Threats'
+  'Cyber Threats', 'GPS Jam'
 ]);
 const WORLD_APIS = new Set([
   'RSS2JSON', 'Finnhub', 'CoinGecko', 'Polymarket', 'USGS', 'FRED',
   'AISStream', 'GDELT Doc', 'EIA', 'USASpending', 'PizzINT', 'FIRMS',
-  'Cyber Threats API'
+  'Global Procurement',
+  'Cyber Threats API', 'BIS', 'WTO', 'SupplyChain', 'OFAC', 'Signal Aggregator'
 ]);
 
-export class StatusPanel {
-  private element: HTMLElement;
-  private isOpen = false;
+import { t } from '../services/i18n';
+import { Panel } from './Panel';
+
+/** Compact digest coverage summary rendered as the panel's status row (#7085). */
+export interface DigestCoverageSummary {
+  state: 'complete' | 'partial' | 'stale' | 'unavailable' | 'unknown';
+  itemsServed: number;
+  publisherCount: number;
+  feedsCompleted: number;
+  feedsTotal: number;
+  categoriesCompleted: number;
+  categoriesTotal: number;
+  missingCategories: string[];
+  /** Items that reached ranking before the 20-per-category cap; 0 when unreported. */
+  itemsConsidered: number;
+  /** Distinct publishers among those items; 0 when unreported. */
+  publishersConsidered: number;
+  /**
+   * Who is serving old content: the server replaying, this browser after its
+   * request failed, or this browser while a language switch loads.
+   */
+  staleCause: 'server' | 'device' | 'switching' | null;
+  /** Server stale reason: build-error | empty-rebuild | gate-held ('' otherwise). */
+  staleReason: string;
+  /** Age of the shown content in seconds, when known. */
+  contentAgeSeconds: number | null;
+}
+
+const DIGEST_COVERAGE_EXPLANATIONS: Record<Exclude<DigestCoverageSummary['state'], 'stale'>, string> = {
+  complete: 'every configured category was covered in this cycle',
+  partial: 'some categories had no completed feed in this cycle',
+  unavailable: 'no news content could be loaded',
+  unknown: 'the news service did not report coverage',
+};
+
+/**
+ * Least share of feeds that must finish for a deadline-cut build with every
+ * category covered to read as complete. Below it most of the pool is missing.
+ */
+const DEADLINE_COMPLETE_FEED_SHARE = 0.9;
+
+const formatCount = (n: number): string => n.toLocaleString('en-US');
+
+function formatAge(seconds: number): string {
+  if (seconds < 60) return 'under a minute';
+  if (seconds < 3600) return `${Math.round(seconds / 60)} min`;
+  return `${Math.round(seconds / 3600)} h`;
+}
+
+function staleExplanation(coverage: DigestCoverageSummary): string {
+  const age = coverage.contentAgeSeconds !== null && coverage.contentAgeSeconds >= 0
+    ? ` from ${formatAge(coverage.contentAgeSeconds)} ago`
+    : '';
+  if (coverage.staleCause === 'device') {
+    return `the news service did not respond, so this is the copy saved on this device${age}`;
+  }
+  if (coverage.staleCause === 'switching') {
+    return `showing the copy saved on this device${age} while this language loads`;
+  }
+  // gate-held: the rebuild succeeded but the acceptance gate kept the
+  // incumbent content live. It is not a failure.
+  if (coverage.staleReason === 'gate-held') {
+    return `showing content${age}; the latest rebuild was held back by a quality check`;
+  }
+  if (coverage.staleReason === 'empty-rebuild') {
+    return `showing content${age}; the latest rebuild came back empty`;
+  }
+  return `showing content${age}; the latest rebuild failed`;
+}
+
+export class StatusPanel extends Panel {
   private feeds: Map<string, FeedStatus> = new Map();
   private apis: Map<string, ApiStatus> = new Map();
-  private allowedFeeds: Set<string>;
-  private allowedApis: Set<string>;
+  private digestCoverageRow: HTMLElement | null = null;
+  private allowedFeeds!: Set<string>;
+  private allowedApis!: Set<string>;
+  public onUpdate: (() => void) | null = null;
 
   constructor() {
-    // Set allowlists based on variant
+    super({ id: 'status', title: t('panels.status') });
+    this.init();
+  }
+
+  private init(): void {
     this.allowedFeeds = SITE_VARIANT === 'tech' ? TECH_FEEDS : WORLD_FEEDS;
     this.allowedApis = SITE_VARIANT === 'tech' ? TECH_APIS : WORLD_APIS;
 
-    this.element = document.createElement('div');
-    this.element.className = 'status-panel-container';
-    this.element.innerHTML = `
-      <button class="status-panel-toggle" title="System Status">
-        <span class="status-icon">◉</span>
-      </button>
-      <div class="status-panel hidden">
-        <div class="status-panel-header">
-          <span>System Health</span>
-          <button class="status-panel-close">×</button>
-        </div>
-        <div class="status-panel-content">
-          <div class="status-section">
-            <div class="status-section-title">Data Feeds</div>
-            <div class="feeds-list"></div>
-          </div>
-          <div class="status-section">
-            <div class="status-section-title">API Status</div>
-            <div class="apis-list"></div>
-          </div>
-          <div class="status-section">
-            <div class="status-section-title">Storage</div>
-            <div class="storage-info"></div>
-          </div>
-        </div>
-        <div class="status-panel-footer">
-          <span class="last-check">Updated just now</span>
-        </div>
-      </div>
-    `;
-
-    this.setupEventListeners();
+    this.element = h('div', { className: 'status-panel-container' });
     this.initDefaultStatuses();
   }
 
-  private setupEventListeners(): void {
-    const toggle = this.element.querySelector('.status-panel-toggle')!;
-    const panel = this.element.querySelector('.status-panel')!;
-    const closeBtn = this.element.querySelector('.status-panel-close')!;
-
-    toggle.addEventListener('click', () => {
-      this.isOpen = !this.isOpen;
-      panel.classList.toggle('hidden', !this.isOpen);
-      if (this.isOpen) this.updateDisplay();
-    });
-
-    closeBtn.addEventListener('click', () => {
-      this.isOpen = false;
-      panel.classList.add('hidden');
-    });
-  }
-
   private initDefaultStatuses(): void {
-    // Initialize all allowed feeds/APIs as disabled
-    // They get enabled when App.ts reports data
     this.allowedFeeds.forEach(name => {
       this.feeds.set(name, { name, lastUpdate: null, status: 'disabled', itemCount: 0 });
     });
-
     this.allowedApis.forEach(name => {
       this.apis.set(name, { name, status: 'disabled' });
     });
   }
 
-  public updateFeed(name: string, status: Partial<FeedStatus>): void {
-    // Only track feeds relevant to current variant
-    if (!this.allowedFeeds.has(name)) return;
+  public getFeeds(): Map<string, FeedStatus> { return this.feeds; }
+  public getApis(): Map<string, ApiStatus> { return this.apis; }
 
+  /**
+   * #7085 digest coverage row: one text line stating what the served digest
+   * covers and why it may be degraded. Text only — never color alone — with
+   * an accessible name and a short explanation, announced politely.
+   */
+  public updateDigestCoverage(coverage: DigestCoverageSummary): void {
+    // The server also reports partial when the build hit its fetch deadline
+    // with every category covered. When nearly every feed still finished, a
+    // reader sees the same thing as a complete build that lost a few feeds to
+    // errors, so call it complete. A deadline that left most feeds unfinished
+    // stays partial (prod 2026-11-18: 137/955 feeds at 18/18 categories).
+    const allCategoriesCovered = coverage.categoriesTotal > 0
+      && coverage.categoriesCompleted === coverage.categoriesTotal
+      && coverage.missingCategories.length === 0;
+    const deadlineOnly = coverage.state === 'partial'
+      && allCategoriesCovered
+      && coverage.feedsCompleted >= coverage.feedsTotal * DEADLINE_COMPLETE_FEED_SHARE;
+    const state = deadlineOnly ? 'complete' : coverage.state;
+    const incompleteFeeds = Math.max(0, coverage.feedsTotal - coverage.feedsCompleted);
+    // The explanation goes in the tooltip only; the footer shows the counts.
+    // The incomplete count mixes deadline aborts with feed errors, so it
+    // names neither cause.
+    const explanation = state === 'stale'
+      ? staleExplanation(coverage)
+      : coverage.state === 'partial' && allCategoriesCovered && incompleteFeeds > 0
+        ? `every configured category was covered; ${formatCount(incompleteFeeds)} ${incompleteFeeds === 1 ? 'feed' : 'feeds'} did not complete`
+        : DIGEST_COVERAGE_EXPLANATIONS[state];
+    // The digest shows at most 20 stories per category, so the served slice
+    // understates how many publishers fed this cycle. Report the ranked pool
+    // when the server sent it.
+    const breadth = coverage.publishersConsidered > 0 && coverage.itemsConsidered > coverage.itemsServed
+      ? `${formatCount(coverage.publishersConsidered)} publishers, ${formatCount(coverage.itemsConsidered)} stories reviewed, top ${formatCount(coverage.itemsServed)} shown`
+      : `${formatCount(coverage.publisherCount)} publishers, ${formatCount(coverage.itemsServed)} stories`;
+    const missing = coverage.missingCategories.length > 0
+      ? ` (no completed feed: ${coverage.missingCategories.slice(0, 4).join(', ')}${coverage.missingCategories.length > 4 ? ', …' : ''})`
+      : '';
+    const text = coverage.state === 'unavailable' || coverage.state === 'unknown'
+      ? `News coverage: ${coverage.state}`
+      : `News coverage: ${state} — ${breadth}, feeds ${coverage.feedsCompleted}/${coverage.feedsTotal}, categories ${coverage.categoriesCompleted}/${coverage.categoriesTotal}${missing}`;
+    if (!this.digestCoverageRow) {
+      this.digestCoverageRow = h('div', {
+        className: 'digest-coverage-row',
+        role: 'status',
+        'aria-live': 'polite',
+        'aria-label': 'News coverage status',
+      });
+      this.element.appendChild(this.digestCoverageRow);
+    }
+    this.ensureCoverageRowMounted();
+    const reason = `${explanation.charAt(0).toUpperCase()}${explanation.slice(1)}.`;
+    // The footer shows only the state and counts. The reason stays in the
+    // live region as visually hidden text, because assistive tech does not
+    // reliably expose title (PR #10988 review).
+    this.digestCoverageRow.replaceChildren(
+      h('span', { className: 'digest-coverage-text' }, text),
+      h('span', { className: 'wm-visually-hidden' }, `. ${reason}`),
+    );
+    // The compact footer (#10461) ellipsizes this row on one line; the
+    // tooltip keeps the full text plus the reason for pointer users.
+    this.digestCoverageRow.title = `${text}. ${reason}`;
+  }
+
+  /**
+   * Nothing else mounts this panel — it is otherwise a write-only data sink
+   * (no getElement() callers), so the row must reach the document from here
+   * or it renders into a detached node no user or screen reader can see.
+   * The compact site footer (#10461) always exists by the first digest load
+   * (layout Phase 1 precedes data loading), so a missing footer only means a
+   * non-dashboard document; the row then stays detached rather than throwing.
+   * CSS keeps the row on the same 28px footer line via ellipsis.
+   */
+  private ensureCoverageRowMounted(): void {
+    if (this.element.isConnected) return;
+    document.querySelector('.site-footer')?.appendChild(this.element);
+  }
+
+  public updateFeed(name: string, status: Partial<FeedStatus>): void {
+    if (!this.allowedFeeds.has(name)) return;
     const existing = this.feeds.get(name) || { name, lastUpdate: null, status: 'ok' as const, itemCount: 0 };
     this.feeds.set(name, { ...existing, ...status, lastUpdate: new Date() });
-    this.updateStatusIcon();
-    if (this.isOpen) this.updateDisplay();
+    this.onUpdate?.();
   }
 
   public updateApi(name: string, status: Partial<ApiStatus>): void {
-    // Only track APIs relevant to current variant
     if (!this.allowedApis.has(name)) return;
-
     const existing = this.apis.get(name) || { name, status: 'ok' as const };
     this.apis.set(name, { ...existing, ...status });
-    this.updateStatusIcon();
-    if (this.isOpen) this.updateDisplay();
+    this.onUpdate?.();
   }
 
-  public setFeedDisabled(name: string): void {
-    const existing = this.feeds.get(name);
-    if (existing) {
-      this.feeds.set(name, { ...existing, status: 'disabled', itemCount: 0, lastUpdate: null });
-      this.updateStatusIcon();
-      if (this.isOpen) this.updateDisplay();
-    }
-  }
-
-  public setApiDisabled(name: string): void {
-    const existing = this.apis.get(name);
-    if (existing) {
-      this.apis.set(name, { ...existing, status: 'disabled' });
-      this.updateStatusIcon();
-      if (this.isOpen) this.updateDisplay();
-    }
-  }
-
-  private updateStatusIcon(): void {
-    const icon = this.element.querySelector('.status-icon')!;
-    // Only count enabled feeds/APIs (not 'disabled') for status indicator
-    const enabledFeeds = [...this.feeds.values()].filter(f => f.status !== 'disabled');
-    const enabledApis = [...this.apis.values()].filter(a => a.status !== 'disabled');
-
-    const hasError = enabledFeeds.some(f => f.status === 'error') ||
-                     enabledApis.some(a => a.status === 'error');
-    const hasWarning = enabledFeeds.some(f => f.status === 'warning') ||
-                       enabledApis.some(a => a.status === 'warning');
-
-    icon.className = 'status-icon';
-    if (hasError) {
-      icon.classList.add('error');
-      icon.textContent = '◉';
-    } else if (hasWarning) {
-      icon.classList.add('warning');
-      icon.textContent = '◉';
-    } else {
-      icon.classList.add('ok');
-      icon.textContent = '◉';
-    }
-  }
-
-  private updateDisplay(): void {
-    const feedsList = this.element.querySelector('.feeds-list')!;
-    const apisList = this.element.querySelector('.apis-list')!;
-    const storageInfo = this.element.querySelector('.storage-info')!;
-    const lastCheck = this.element.querySelector('.last-check')!;
-
-    feedsList.innerHTML = [...this.feeds.values()].map(feed => `
-      <div class="status-row">
-        <span class="status-dot ${escapeHtml(feed.status)}"></span>
-        <span class="status-name">${escapeHtml(feed.name)}</span>
-        <span class="status-detail">${escapeHtml(String(feed.itemCount))} items</span>
-        <span class="status-time">${escapeHtml(feed.lastUpdate ? this.formatTime(feed.lastUpdate) : 'Never')}</span>
-      </div>
-    `).join('');
-
-    apisList.innerHTML = [...this.apis.values()].map(api => `
-      <div class="status-row">
-        <span class="status-dot ${escapeHtml(api.status)}"></span>
-        <span class="status-name">${escapeHtml(api.name)}</span>
-        ${api.latency ? `<span class="status-detail">${escapeHtml(String(api.latency))}ms</span>` : ''}
-      </div>
-    `).join('');
-
-    this.updateStorageInfo(storageInfo);
-    lastCheck.textContent = `Updated ${this.formatTime(new Date())}`;
-  }
-
-  private async updateStorageInfo(container: Element): Promise<void> {
-    try {
-      if ('storage' in navigator && 'estimate' in navigator.storage) {
-        const estimate = await navigator.storage.estimate();
-        const used = estimate.usage ? (estimate.usage / 1024 / 1024).toFixed(2) : '0';
-        const quota = estimate.quota ? (estimate.quota / 1024 / 1024).toFixed(0) : 'N/A';
-        container.innerHTML = `
-          <div class="status-row">
-            <span class="status-name">IndexedDB</span>
-            <span class="status-detail">${used} MB / ${quota} MB</span>
-          </div>
-        `;
-      } else {
-        container.innerHTML = `<div class="status-row">Storage info unavailable</div>`;
-      }
-    } catch {
-      container.innerHTML = `<div class="status-row">Storage info unavailable</div>`;
-    }
-  }
-
-  private formatTime(date: Date): string {
+  public formatTime(date: Date): string {
     const now = Date.now();
     const diff = now - date.getTime();
     if (diff < 60000) return 'just now';

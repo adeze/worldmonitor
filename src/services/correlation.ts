@@ -3,7 +3,8 @@
  * Core logic is in analysis-core.ts (shared with worker).
  */
 
-import type { ClusteredEvent, PredictionMarket, MarketData } from '@/types';
+import type { ClusteredEvent, MarketData } from '@/types';
+import type { PredictionMarket } from '@/services/prediction';
 import { getSourceType } from '@/config/feeds';
 import {
   analyzeCorrelationsCore,
@@ -82,5 +83,8 @@ export function addToSignalHistory(signals: CorrelationSignal[]): void {
   signalHistory.push(...signals);
   while (signalHistory.length > 100) {
     signalHistory.shift();
+  }
+  if (signals.length > 0) {
+    document.dispatchEvent(new CustomEvent('wm:intelligence-updated'));
   }
 }

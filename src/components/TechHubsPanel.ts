@@ -1,6 +1,9 @@
 import { Panel } from './Panel';
+import { t } from '@/services/i18n';
 import type { TechHubActivity } from '@/services/tech-activity';
-import { escapeHtml, sanitizeUrl } from '@/utils/sanitize';
+import { escapeHtml, sanitizeUrl, unsafeRawHtml } from '@/utils/sanitize';
+import { getCSSColor } from '@/utils';
+import { bindActivationKeys } from '@/utils/activation';
 
 const COUNTRY_FLAGS: Record<string, string> = {
   'USA': '🇺🇸', 'United States': '🇺🇸',
@@ -64,18 +67,23 @@ export class TechHubsPanel extends Panel {
   constructor() {
     super({
       id: 'tech-hubs',
-      title: 'Hot Tech Hubs',
+      title: t('panels.techHubs'),
       showCount: true,
-      infoTooltip: `
-        <strong>Tech Hub Activity</strong><br>
-        Shows tech hubs with the most news activity.<br><br>
-        <em>Activity levels:</em><br>
-        • <span style="color: #00ff88">High</span> — Breaking news or 50+ score<br>
-        • <span style="color: #ffc800">Elevated</span> — Score 20-49<br>
-        • <span style="color: #888">Low</span> — Score below 20<br><br>
-        Click a hub to zoom to its location.
-      `,
+      infoTooltip: t('components.techHubs.infoTooltip', {
+        highColor: getCSSColor('--semantic-normal'),
+        elevatedColor: getCSSColor('--semantic-elevated'),
+        lowColor: getCSSColor('--text-dim'),
+      }),
     });
+    // Delegated click survives Panel.setSafeContent's 150ms debounce; per-row
+    // binds after render target the stale (often empty) DOM.
+    this.content.addEventListener('click', (e) => {
+      const item = (e.target as HTMLElement | null)?.closest<HTMLElement>('.tech-hub-item');
+      if (!item || !this.content.contains(item)) return;
+      const hub = this.activities.find(a => a.hubId === item.dataset.hubId);
+      if (hub && this.onHubClick) this.onHubClick(hub);
+    });
+    bindActivationKeys(this.content, '.tech-hub-item');
   }
 
   public setOnHubClick(handler: (hub: TechHubActivity) => void): void {
@@ -94,7 +102,7 @@ export class TechHubsPanel extends Panel {
 
   private render(): void {
     if (this.activities.length === 0) {
-      this.showError('No active tech hubs');
+      this.showError(t('common.noActiveTechHubs'));
       return;
     }
 
@@ -104,7 +112,7 @@ export class TechHubsPanel extends Panel {
       const topStory = hub.topStories[0];
 
       return `
-        <div class="tech-hub-item ${hub.activityLevel}" data-hub-id="${escapeHtml(hub.hubId)}" data-index="${index}">
+        <div class="tech-hub-item ${hub.activityLevel}" data-hub-id="${escapeHtml(hub.hubId)}" data-index="${index}" role="button" tabindex="0">
           <div class="hub-rank">${index + 1}</div>
           <span class="hub-indicator ${hub.activityLevel}"></span>
           <div class="hub-info">
@@ -129,20 +137,6 @@ export class TechHubsPanel extends Panel {
       `;
     }).join('');
 
-    this.setContent(html);
-    this.bindEvents();
-  }
-
-  private bindEvents(): void {
-    const items = this.content.querySelectorAll<HTMLDivElement>('.tech-hub-item');
-    items.forEach((item) => {
-      item.addEventListener('click', () => {
-        const hubId = item.dataset.hubId;
-        const hub = this.activities.find(a => a.hubId === hubId);
-        if (hub && this.onHubClick) {
-          this.onHubClick(hub);
-        }
-      });
-    });
+    this.setSafeContent(unsafeRawHtml(html, 'legacy Panel.setContent() migration'));
   }
 }

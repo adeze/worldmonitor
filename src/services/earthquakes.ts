@@ -1,67 +1,40 @@
-import type { Earthquake } from '@/types';
-import { API_URLS } from '@/config';
-import { createCircuitBreaker } from '@/utils';
-import { getPersistentCache, setPersistentCache } from './persistent-cache';
+import { getRpcBaseUrl } from '@/services/rpc-client';
+import type { Earthquake as ProtoEarthquake, ListEarthquakesResponse } from '@/generated/client/worldmonitor/seismology/v1/service_client';
+import { createCircuitBreaker } from '@/utils/circuit-breaker';
+import { getHydratedData } from '@/services/bootstrap';
+import { SeismologyServiceClient } from '@/services/generated-rpc-clients';
 
-interface USGSFeature {
-  id: string;
-  properties: {
-    place: string;
-    mag: number;
-    time: number;
-    url: string;
-  };
-  geometry: {
-    coordinates: [number, number, number];
-  };
-}
+// Proto Earthquake.source / .category (fields 12 / 13) carry USGS vs NRCan
+// attribution. Keep the union so dashboard/MCP can narrow 'usgs' | 'nrcan'.
+export type Earthquake = ProtoEarthquake & {
+  source?: 'usgs' | 'nrcan' | string;
+  category?: string;
+};
 
-interface USGSResponse {
-  features: USGSFeature[];
-}
+const client = new SeismologyServiceClient(getRpcBaseUrl(), { fetch: (...args) => globalThis.fetch(...args) });
+// Shorter than the 10-minute natural poll, so every poll asks the server. A
+// longer TTL answered polls from the client cache and, once stale, showed the
+// old list while refreshing in the background: a new quake appeared one poll
+// late, up to two hours after USGS published it.
+const breaker = createCircuitBreaker<ListEarthquakesResponse>({ name: 'Seismology', cacheTtlMs: 5 * 60 * 1000, persistCache: true });
 
-const OVERLAY_CACHE_KEY = 'map-overlay:earthquakes';
-const breaker = createCircuitBreaker<Earthquake[]>({ name: 'USGS Earthquakes' });
-
-async function getFallbackEarthquakes(): Promise<Earthquake[]> {
-  const entry = await getPersistentCache<Array<Omit<Earthquake, 'time'> & { time: string }>>(OVERLAY_CACHE_KEY);
-  if (!entry?.data) return [];
-  return entry.data.map(item => ({ ...item, time: new Date(item.time) }));
-}
+const emptyFallback: ListEarthquakesResponse = { earthquakes: [] };
+// The poll waits for a stale refresh, so a stalled request would hold back
+// the whole natural-events load. At the deadline the saved list is returned.
+const EARTHQUAKE_REQUEST_TIMEOUT_MS = 10_000;
 
 export async function fetchEarthquakes(): Promise<Earthquake[]> {
-  const live = await breaker.execute(async () => {
-    const response = await fetch(API_URLS.earthquakes);
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-
-    const data: USGSResponse = await response.json();
-    return data.features.map((feature) => ({
-      id: feature.id,
-      place: feature.properties.place || 'Unknown',
-      magnitude: feature.properties.mag,
-      lon: feature.geometry.coordinates[0],
-      lat: feature.geometry.coordinates[1],
-      depth: feature.geometry.coordinates[2],
-      time: new Date(feature.properties.time),
-      url: feature.properties.url,
-    }));
-  }, []);
-
-  if (live.length > 0) {
-    void setPersistentCache(
-      OVERLAY_CACHE_KEY,
-      live.map(item => ({ ...item, time: item.time.toISOString() }))
-    );
-    return live;
+  const hydrated = getHydratedData('earthquakes') as ListEarthquakesResponse | undefined;
+  if (hydrated?.earthquakes?.length) {
+    breaker.recordSuccess(hydrated);
+    return hydrated.earthquakes as Earthquake[];
   }
 
-  return getFallbackEarthquakes();
-}
-
-export function getEarthquakesStatus(): string {
-  return breaker.getStatus();
-}
-
-export function getEarthquakesDataState() {
-  return breaker.getDataState();
+  const response = await breaker.execute(async () => {
+    return client.listEarthquakes(
+      { minMagnitude: 0, start: 0, end: 0, pageSize: 0, cursor: '' },
+      { signal: AbortSignal.timeout(EARTHQUAKE_REQUEST_TIMEOUT_MS) },
+    );
+  }, emptyFallback, { shouldCache: (r) => r.earthquakes.length > 0, staleRefreshMode: 'await' });
+  return response.earthquakes as Earthquake[];
 }

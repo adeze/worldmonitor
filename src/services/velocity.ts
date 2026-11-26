@@ -1,29 +1,32 @@
 import type { ClusteredEvent, VelocityMetrics, VelocityLevel, SentimentType } from '@/types';
 import { mlWorker } from './ml-worker';
+import { effectivePubDateMs } from './feed-date';
 
 const HOUR_MS = 60 * 60 * 1000;
 const ELEVATED_THRESHOLD = 3;
 const SPIKE_THRESHOLD = 6;
 
-const NEGATIVE_WORDS = new Set([
+// Keep the sets disjoint. Omit context-dependent terms such as "surge":
+// both markets and disease cases can surge.
+export const NEGATIVE_WORDS = new Set([
   'war', 'attack', 'killed', 'death', 'dead', 'crisis', 'crash', 'collapse',
   'threat', 'danger', 'escalate', 'escalation', 'conflict', 'strike', 'bomb',
   'explosion', 'casualties', 'disaster', 'emergency', 'catastrophe', 'fail',
   'failure', 'reject', 'rejected', 'sanctions', 'invasion', 'missile', 'nuclear',
   'terror', 'terrorist', 'hostage', 'assassination', 'coup', 'protest', 'riot',
-  'warns', 'warning', 'fears', 'concern', 'worried', 'plunge', 'plummet', 'surge',
+  'warns', 'warning', 'fears', 'concern', 'worried', 'plunge', 'plummet',
   'flee', 'evacuate', 'shutdown', 'layoff', 'layoffs', 'cuts', 'slump', 'recession',
 ]);
 
-const POSITIVE_WORDS = new Set([
+export const POSITIVE_WORDS = new Set([
   'peace', 'deal', 'agreement', 'breakthrough', 'success', 'win', 'gains',
-  'recovery', 'growth', 'rise', 'surge', 'boost', 'rally', 'soar', 'jump',
+  'recovery', 'growth', 'rise', 'boost', 'rally', 'soar', 'jump',
   'ceasefire', 'treaty', 'alliance', 'partnership', 'cooperation', 'progress',
   'release', 'released', 'freed', 'rescue', 'saved', 'approved', 'passes',
   'record', 'milestone', 'historic', 'landmark', 'celebrates', 'victory',
 ]);
 
-function analyzeSentiment(text: string): { sentiment: SentimentType; score: number } {
+export function analyzeSentiment(text: string): { sentiment: SentimentType; score: number } {
   const words = text.toLowerCase().split(/\W+/);
   let score = 0;
 
@@ -54,9 +57,19 @@ export function calculateVelocity(cluster: ClusteredEvent): VelocityMetrics {
   const timeSpanHours = Math.max(timeSpanMs / HOUR_MS, 0.25);
   const sourcesPerHour = items.length / timeSpanHours;
 
+  // Exclude pubDateMissing items from trend math entirely. `clustering.ts:116`
+  // aggregates raw `pubDate.getTime()` into `firstSeen`/`lastUpdated` for
+  // cluster metadata (allow-listed — see feed-date-ranking-uses-effective
+  // test). If we let missing-date items into this midpoint partition while
+  // the cluster's firstSeen/lastUpdated were computed from their synthesized
+  // stamps, every such item would land in `olderItems` (effectivePubDateMs
+  // returns 0) and falsely tilt the trend toward 'falling'. Computing trend
+  // only on items with real timestamps preserves the cluster-metadata path
+  // without composing the two policies into a wrong answer.
+  const datedItems = items.filter((i) => i.pubDateMissing !== true);
   const midpoint = cluster.firstSeen.getTime() + timeSpanMs / 2;
-  const recentItems = items.filter(i => i.pubDate.getTime() > midpoint);
-  const olderItems = items.filter(i => i.pubDate.getTime() <= midpoint);
+  const recentItems = datedItems.filter((i) => effectivePubDateMs(i) > midpoint);
+  const olderItems = datedItems.filter((i) => effectivePubDateMs(i) <= midpoint);
 
   let trend: 'rising' | 'stable' | 'falling' = 'stable';
   if (recentItems.length > olderItems.length * 1.5) {
@@ -82,30 +95,6 @@ export function enrichWithVelocity(clusters: ClusteredEvent[]): ClusteredEvent[]
     ...cluster,
     velocity: calculateVelocity(cluster),
   }));
-}
-
-export async function calculateVelocityWithML(cluster: ClusteredEvent): Promise<VelocityMetrics> {
-  const baseMetrics = calculateVelocity(cluster);
-
-  if (!mlWorker.isAvailable) return baseMetrics;
-
-  try {
-    const results = await mlWorker.classifySentiment([cluster.primaryTitle]);
-    const sentiment = results[0];
-    if (!sentiment) return baseMetrics;
-
-    const mlSentiment: SentimentType = sentiment.label === 'positive' ? 'positive' :
-      sentiment.label === 'negative' ? 'negative' : 'neutral';
-    const mlScore = sentiment.label === 'negative' ? -sentiment.score : sentiment.score;
-
-    return {
-      ...baseMetrics,
-      sentiment: mlSentiment,
-      sentimentScore: mlScore,
-    };
-  } catch {
-    return baseMetrics;
-  }
 }
 
 export async function enrichWithVelocityML(clusters: ClusteredEvent[]): Promise<ClusteredEvent[]> {

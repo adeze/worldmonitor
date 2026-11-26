@@ -1,89 +1,93 @@
+
 import { Panel } from './Panel';
-import { escapeHtml } from '@/utils/sanitize';
-import { isDesktopRuntime } from '@/services/runtime';
+import { t } from '@/services/i18n';
 import {
-  getDesktopReadinessChecks,
-  getKeyBackedAvailabilitySummary,
-  getNonParityFeatures,
-} from '@/services/desktop-readiness';
-
-interface ServiceStatus {
-  id: string;
-  name: string;
-  category: string;
-  status: 'operational' | 'degraded' | 'outage' | 'unknown';
-  description: string;
-}
-
-interface LocalBackendStatus {
-  enabled?: boolean;
-  mode?: string;
-  port?: number;
-  remoteBase?: string;
-}
-
-interface ServiceStatusResponse {
-  success: boolean;
-  timestamp: string;
-  summary: {
-    operational: number;
-    degraded: number;
-    outage: number;
-    unknown: number;
-  };
-  services: ServiceStatus[];
-  local?: LocalBackendStatus;
-}
+  fetchServiceStatuses,
+  type ServiceStatusResult as ServiceStatus,
+} from '@/services/infrastructure';
+import { h, replaceChildren } from '@/utils/dom-utils';
 
 type CategoryFilter = 'all' | 'cloud' | 'dev' | 'comm' | 'ai' | 'saas';
 
-const CATEGORY_LABELS: Record<CategoryFilter, string> = {
-  all: 'All',
-  cloud: 'Cloud',
-  dev: 'Dev Tools',
-  comm: 'Comms',
-  ai: 'AI',
-  saas: 'SaaS',
-};
+function getCategoryLabel(category: CategoryFilter): string {
+  const labels: Record<CategoryFilter, string> = {
+    all: t('components.serviceStatus.categories.all'),
+    cloud: t('components.serviceStatus.categories.cloud'),
+    dev: t('components.serviceStatus.categories.dev'),
+    comm: t('components.serviceStatus.categories.comm'),
+    ai: t('components.serviceStatus.categories.ai'),
+    saas: t('components.serviceStatus.categories.saas'),
+  };
+  return labels[category];
+}
 
 export class ServiceStatusPanel extends Panel {
   private services: ServiceStatus[] = [];
   private loading = true;
   private error: string | null = null;
   private filter: CategoryFilter = 'all';
-  private refreshInterval: ReturnType<typeof setInterval> | null = null;
-  private localBackend: LocalBackendStatus | null = null;
-
   constructor() {
-    super({ id: 'service-status', title: 'Service Status', showCount: false });
-    void this.fetchStatus();
-    this.refreshInterval = setInterval(() => this.fetchStatus(), 60000);
+    super({ id: 'service-status', title: t('panels.serviceStatus'), showCount: false, infoTooltip: t('components.serviceStatus.infoTooltip') });
   }
 
-  public destroy(): void {
-    if (this.refreshInterval) {
-      clearInterval(this.refreshInterval);
-      this.refreshInterval = null;
+  private lastServicesJson = '';
+
+  public async fetchStatus(signal?: AbortSignal): Promise<boolean> {
+    if (this.signal.aborted || signal?.aborted) return false;
+    let requestSignal: AbortSignal = this.signal;
+    let cleanupSignals: (() => void) | undefined;
+    if (signal) {
+      const panelSignal = this.signal;
+      const runController = new AbortController();
+      const onPanelAbort = (): void => runController.abort(panelSignal.reason);
+      const onCallerAbort = (): void => runController.abort(signal.reason);
+      panelSignal.addEventListener('abort', onPanelAbort, { once: true });
+      signal.addEventListener('abort', onCallerAbort, { once: true });
+      requestSignal = runController.signal;
+      cleanupSignals = () => {
+        panelSignal.removeEventListener('abort', onPanelAbort);
+        signal.removeEventListener('abort', onCallerAbort);
+      };
     }
-  }
-
-  private async fetchStatus(): Promise<void> {
+    let keptLastGood = false;
+    let aborted = false;
     try {
-      const res = await fetch('/api/service-status');
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await fetchServiceStatuses(requestSignal);
+      if (requestSignal.aborted || !this.element?.isConnected) {
+        aborted = true;
+        return false;
+      }
+      if (!data.success || data.services.length === 0) {
+        if (this.services.length > 0) {
+          keptLastGood = true;
+          return false;
+        }
+        throw new Error('Failed to load status');
+      }
 
-      const data: ServiceStatusResponse = await res.json();
-      if (!data.success) throw new Error('Failed to load status');
-
+      const fingerprint = data.services.map(s => `${s.name}:${s.status}`).join(',');
+      const changed = fingerprint !== this.lastServicesJson;
+      this.lastServicesJson = fingerprint;
       this.services = data.services;
-      this.localBackend = data.local ?? null;
       this.error = null;
+      return changed;
     } catch (err) {
-      this.error = err instanceof Error ? err.message : 'Failed to fetch';
+      if (requestSignal.aborted || this.isAbortError(err)) {
+        aborted = true;
+        return false;
+      }
+      if (!this.element?.isConnected) return false;
+      this.error = t('common.failedToLoad');
       console.error('[ServiceStatus] Fetch error:', err);
+      return true;
     } finally {
-      this.loading = false;
-      this.render();
+      cleanupSignals?.();
+      if (!aborted) {
+        this.loading = false;
+        if (this.element?.isConnected && !keptLastGood) {
+          this.render();
+        }
+      }
     }
   }
 
@@ -99,144 +103,77 @@ export class ServiceStatusPanel extends Panel {
 
   protected render(): void {
     if (this.loading) {
-      this.content.innerHTML = `
-        <div class="service-status-loading">
-          <div class="loading-spinner"></div>
-          <span>Checking services...</span>
-        </div>
-      `;
+      replaceChildren(this.content,
+        h('div', { className: 'service-status-loading' },
+          h('div', { className: 'loading-spinner' }),
+          h('span', null, t('components.serviceStatus.checkingServices')),
+        ),
+      );
       return;
     }
 
     if (this.error) {
-      this.content.innerHTML = `
-        <div class="service-status-error">
-          <span class="error-text">${escapeHtml(this.error)}</span>
-          <button class="retry-btn">Retry</button>
-        </div>
-      `;
-      this.content.querySelector('.retry-btn')?.addEventListener('click', () => {
-        this.loading = true;
-        this.render();
-        void this.fetchStatus();
-      });
+      this.showError(this.error, () => { this.loading = true; this.render(); void this.fetchStatus(); });
       return;
     }
 
     const filtered = this.getFilteredServices();
     const issues = filtered.filter(s => s.status !== 'operational');
 
-    const backendHtml = this.renderBackendStatus();
-    const readinessHtml = this.renderDesktopReadiness();
-    const summaryHtml = this.renderSummary(filtered);
-    const filtersHtml = this.renderFilters();
-    const servicesHtml = this.renderServices(filtered);
-
-    this.content.innerHTML = `
-      ${backendHtml}
-      ${readinessHtml}
-      ${summaryHtml}
-      ${filtersHtml}
-      <div class="service-status-list">
-        ${servicesHtml}
-      </div>
-      ${issues.length === 0 ? '<div class="all-operational">All services operational</div>' : ''}
-    `;
-
-    this.attachFilterListeners();
+    this.setContentNodes(
+      this.buildSummary(filtered),
+      this.buildFilters(),
+      h('div', { className: 'service-status-list' },
+        ...this.buildServiceItems(filtered),
+      ),
+      filtered.length === 0 ? h('div', { className: 'panel-empty' }, t('common.noDataAvailable')) : false,
+      filtered.length > 0 && issues.length === 0 ? h('div', { className: 'all-operational' }, t('components.serviceStatus.allOperational')) : false,
+    );
   }
 
-
-  private renderBackendStatus(): string {
-    if (!isDesktopRuntime()) return '';
-
-    if (!this.localBackend?.enabled) {
-      return `
-        <div class="service-status-backend warning">
-          Desktop local backend unavailable. Falling back to cloud API.
-        </div>
-      `;
-    }
-
-    const port = this.localBackend.port ?? 46123;
-    const remote = this.localBackend.remoteBase ?? 'https://worldmonitor.app';
-
-    return `
-      <div class="service-status-backend">
-        Local backend active on <strong>127.0.0.1:${port}</strong> · cloud fallback: <strong>${escapeHtml(remote)}</strong>
-      </div>
-    `;
-  }
-
-  private renderSummary(services: ServiceStatus[]): string {
+  private buildSummary(services: ServiceStatus[]): HTMLElement {
     const operational = services.filter(s => s.status === 'operational').length;
     const degraded = services.filter(s => s.status === 'degraded').length;
     const outage = services.filter(s => s.status === 'outage').length;
 
-    return `
-      <div class="service-status-summary">
-        <div class="summary-item operational">
-          <span class="summary-count">${operational}</span>
-          <span class="summary-label">OK</span>
-        </div>
-        <div class="summary-item degraded">
-          <span class="summary-count">${degraded}</span>
-          <span class="summary-label">Degraded</span>
-        </div>
-        <div class="summary-item outage">
-          <span class="summary-count">${outage}</span>
-          <span class="summary-label">Outage</span>
-        </div>
-      </div>
-    `;
+    return h('div', { className: 'service-status-summary' },
+      h('div', { className: 'summary-item operational' },
+        h('span', { className: 'summary-count' }, String(operational)),
+        h('span', { className: 'summary-label' }, t('components.serviceStatus.ok')),
+      ),
+      h('div', { className: 'summary-item degraded' },
+        h('span', { className: 'summary-count' }, String(degraded)),
+        h('span', { className: 'summary-label' }, t('components.serviceStatus.degraded')),
+      ),
+      h('div', { className: 'summary-item outage' },
+        h('span', { className: 'summary-count' }, String(outage)),
+        h('span', { className: 'summary-label' }, t('components.serviceStatus.outage')),
+      ),
+    );
   }
 
-  private renderDesktopReadiness(): string {
-    if (!isDesktopRuntime()) return '';
 
-    const checks = getDesktopReadinessChecks(Boolean(this.localBackend?.enabled));
-    const keySummary = getKeyBackedAvailabilitySummary();
-    const nonParity = getNonParityFeatures();
-
-    return `
-      <div class="service-status-desktop-readiness">
-        <div class="service-status-desktop-title">Desktop readiness</div>
-        <div class="service-status-desktop-subtitle">Acceptance checks: ${checks.filter(check => check.ready).length}/${checks.length} ready · key-backed features ${keySummary.available}/${keySummary.total}</div>
-        <ul class="service-status-desktop-list">
-          ${checks.map(check => `<li>${check.ready ? '✅' : '⚠️'} ${escapeHtml(check.label)}</li>`).join('')}
-        </ul>
-        <details class="service-status-non-parity">
-          <summary>Non-parity fallbacks (${nonParity.length})</summary>
-          <ul>
-            ${nonParity.map(feature => `<li><strong>${escapeHtml(feature.panel)}</strong>: ${escapeHtml(feature.fallback)}</li>`).join('')}
-          </ul>
-        </details>
-      </div>
-    `;
+  private buildFilters(): HTMLElement {
+    const categories: CategoryFilter[] = ['all', 'cloud', 'dev', 'comm', 'ai', 'saas'];
+    return h('div', { className: 'service-status-filters' },
+      ...categories.map(key =>
+        h('button', {
+          className: `status-filter-btn ${this.filter === key ? 'active' : ''}`,
+          dataset: { filter: key },
+          onClick: () => this.setFilter(key),
+        }, getCategoryLabel(key)),
+      ),
+    );
   }
 
-  private renderFilters(): string {
-    const filters = Object.entries(CATEGORY_LABELS).map(([key, label]) => {
-      const active = this.filter === key ? 'active' : '';
-      return `<button class="status-filter-btn ${active}" data-filter="${key}">${label}</button>`;
-    }).join('');
-
-    return `<div class="service-status-filters">${filters}</div>`;
-  }
-
-  private renderServices(services: ServiceStatus[]): string {
-    return services.map(service => {
-      const statusIcon = this.getStatusIcon(service.status);
-      const statusClass = service.status;
-
-      return `
-        <div class="service-status-item ${statusClass}">
-          <span class="status-icon">${statusIcon}</span>
-          <span class="status-name">${escapeHtml(service.name)}</span>
-          <span class="status-badge ${statusClass}">${service.status.toUpperCase()}</span>
-        </div>
-      `;
-    }).join('');
+  private buildServiceItems(services: ServiceStatus[]): HTMLElement[] {
+    return services.map(service =>
+      h('div', { className: `service-status-item ${service.status}` },
+        h('span', { className: 'status-icon' }, this.getStatusIcon(service.status)),
+        h('span', { className: 'status-name' }, service.name),
+        h('span', { className: `status-badge ${service.status}` }, service.status.toUpperCase()),
+      ),
+    );
   }
 
   private getStatusIcon(status: string): string {
@@ -248,12 +185,4 @@ export class ServiceStatusPanel extends Panel {
     }
   }
 
-  private attachFilterListeners(): void {
-    this.content.querySelectorAll('.status-filter-btn').forEach(btn => {
-      btn.addEventListener('click', () => {
-        const filter = (btn as HTMLElement).dataset.filter as CategoryFilter;
-        this.setFilter(filter);
-      });
-    });
-  }
 }
